@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"image"
 	"math"
 )
@@ -21,6 +22,8 @@ type ChannelStatistics struct {
 	Samples        int     // Number of samples analyzed
 	Transitions    float64 // Rate of 0->1 and 1->0 transitions
 	FirstOrderBias float64 // First-order bias score (correlation with adjacent pixels)
+	ZeroCount      int     // Count of zeros in LSB distribution
+	OneCount       int     // Count of ones in LSB distribution
 }
 
 // AnalyzeLSBStatistics performs advanced statistical analysis on the LSBs of an image
@@ -263,12 +266,136 @@ func calculatePatternScore(lsbValues []byte, width int) float64 {
 // DetectSteganoAnomaly combines statistical measures to determine if an image likely contains steganography
 // Returns an anomaly score and detailed analysis
 func DetectSteganoAnomaly(img image.Image) (float64, *LSBDistribution, error) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("Recovered from panic in statistical analysis: %v\n", r)
+		}
+	}()
+
 	// Perform the statistical analysis
 	dist, err := AnalyzeLSBStatistics(img)
 	if err != nil {
 		return 0, nil, err
 	}
 
+	// Calculate an anomaly score based on the statistics
+	anomalyScore := calculateAnomalyScore(*dist)
+
 	// Return the anomaly score and detailed distribution information
-	return dist.AnomalyScore, dist, nil
+	return anomalyScore, dist, nil
+}
+
+// calculateAnomalyScore computes a score from 0-1 indicating how likely the
+// image contains hidden data based on LSB statistics
+func calculateAnomalyScore(dist LSBDistribution) float64 {
+	score := 0.0
+
+	// Perfect entropy is suspicious
+	if dist.Entropy > 0.99 {
+		score += 0.5
+	} else if dist.Entropy < 0.3 {
+		// Very low entropy is also suspicious
+		score += 0.4
+	}
+
+	// Check for unusual patterns in individual channels
+	channelScores := make([]float64, 0)
+
+	for _, stats := range dist.ChannelStats {
+		channelScore := 0.0
+
+		// Perfect entropy in any channel is suspicious
+		if stats.Entropy > 0.99 {
+			channelScore += 0.3
+		}
+
+		// Unusual ratio of zeros to ones
+		if stats.ZeroCount > 0 && stats.OneCount > 0 {
+			ratio := float64(stats.ZeroCount) / float64(stats.OneCount)
+			if ratio > 1.2 || ratio < 0.8 {
+				channelScore += 0.2
+			}
+		}
+
+		// Too many or too few transitions between 0 and 1
+		expectedTransitions := float64(stats.ZeroCount+stats.OneCount) * 0.5
+		if stats.Transitions > 0 {
+			transRatio := float64(stats.Transitions) / expectedTransitions
+			if transRatio > 1.3 || transRatio < 0.7 {
+				channelScore += 0.2
+			}
+		}
+
+		channelScores = append(channelScores, channelScore)
+	}
+
+	// Take the highest channel score
+	if len(channelScores) > 0 {
+		maxChannelScore := 0.0
+		for _, cs := range channelScores {
+			if cs > maxChannelScore {
+				maxChannelScore = cs
+			}
+		}
+		score += maxChannelScore
+	}
+
+	// Normalize to 0-1 range
+	score = math.Min(score, 1.0)
+
+	return score
+}
+
+// calculatePatternRepetition measures how much patterns repeat in LSBs
+func calculatePatternRepetition(patterns map[string]int, totalPatterns int) float64 {
+	if totalPatterns == 0 {
+		return 0.0
+	}
+
+	// Calculate Shannon entropy of pattern distribution
+	entropy := 0.0
+	for _, count := range patterns {
+		p := float64(count) / float64(totalPatterns)
+		entropy -= p * math.Log2(p)
+	}
+
+	// Normalize to 0-1 scale where 0 means perfectly uniform
+	// and 1 means single pattern dominates
+	maxEntropy := math.Log2(float64(len(patterns)))
+	if maxEntropy > 0 {
+		return 1.0 - (entropy / maxEntropy)
+	}
+	return 0.0
+}
+
+// calculateDifferenceDistribution analyzes differences between adjacent pixels
+func calculateDifferenceDistribution(diffHistogram []int, totalPixels int) float64 {
+	if totalPixels == 0 {
+		return 0.0
+	}
+
+	// Calculate entropy of differences
+	entropy := 0.0
+	for _, count := range diffHistogram {
+		if count > 0 {
+			p := float64(count) / float64(totalPixels)
+			entropy -= p * math.Log2(p)
+		}
+	}
+
+	// Lower entropy means less natural variation between pixels
+	// Normalize to 0-1 scale
+	maxEntropy := math.Log2(float64(len(diffHistogram)))
+	if maxEntropy > 0 {
+		return 1.0 - (entropy / maxEntropy)
+	}
+	return 0.0
+}
+
+// abs returns the absolute value of x
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
