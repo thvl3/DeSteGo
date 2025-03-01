@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"image"
@@ -10,12 +12,134 @@ import (
 	_ "image/png"
 	"io"
 	"log"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 )
+
+// moveFiles moves all PNG and JPG files from subdirectories to the target directory
+func moveFiles(rootDir string) error {
+	return filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		// Check if file is PNG or JPG
+		if !info.IsDir() && (filepath.Ext(path) == ".png" || filepath.Ext(path) == ".jpg" || filepath.Ext(path) == ".jpeg") {
+			destPath := filepath.Join(rootDir, filepath.Base(path))
+			fmt.Printf("Moving: %s -> %s\n", path, destPath)
+			err := os.Rename(path, destPath) // Move file
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// removeEmptyDirsRecursively keeps deleting empty folders until none remain
+func removeEmptyDirsRecursively(rootDir string) error {
+	removed := true
+	for removed { // Keep looping until no more empty dirs are deleted
+		removed = false
+		filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				files, err := os.ReadDir(path)
+				if err != nil {
+					return err
+				}
+				if len(files) == 0 && path != rootDir {
+					fmt.Printf("Removing empty folder: %s\n", path)
+					os.Remove(path) // Delete empty directory
+					removed = true  // Mark as removed so we check again
+				}
+			}
+			return nil
+		})
+	}
+	return nil
+}
+
+func scrape() {
+	// Check for required arguments
+	if len(os.Args) < 3 {
+		fmt.Println("Usage: go-run <url> <download_directory>")
+		os.Exit(1)
+	}
+
+	url := os.Args[1]
+	downloadDir := os.Args[2]
+
+	// Run gallery-dl command
+	fmt.Println("Running gallery-dl...")
+	cmd := exec.Command("./gallery-dl.bin", url, "-d", downloadDir)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		log.Fatalf("Error running gallery-dl: %v", err)
+	}
+
+	// Move files
+	fmt.Println("Moving image files...")
+	if err := moveFiles(downloadDir); err != nil {
+		log.Fatalf("Error moving files: %v", err)
+	}
+
+	// Remove empty directories recursively
+	fmt.Println("Cleaning up empty directories...")
+	if err := removeEmptyDirsRecursively(downloadDir); err != nil {
+		log.Fatalf("Error removing empty directories: %v", err)
+	}
+
+	fmt.Println("Process completed successfully!")
+}
+
+// Usage: GrabFromURL(url)
+//Make sure the url is a full url path, as a string
+
+// generate a random filename
+func GenerateFilename(dir string) (string, error) {
+	fp_buffer := make([]byte, 16)
+	_, errr := rand.Read(fp_buffer)
+	if errr != nil {
+		fmt.Println("Error: Could not generate random filename (basic_grab.go)")
+	}
+	filename := hex.EncodeToString(fp_buffer)
+	fullpath := dir + filename + ".jpg"
+	// check its stats with os; if it doesn't return an error (meaning the file exists), run it back to ensure no duplicates
+	if _, err := os.Stat(fullpath); err == nil {
+		return GenerateFilename(dir)
+	}
+	return fullpath, nil
+}
+
+// main grab function, meant to use with direct image urls
+func GrabFromURL(url string) {
+	// make an http request to given url
+	response, err := http.Get(url)
+
+	if err != nil {
+		fmt.Println("Error: HTTP request unsuccessful (basic_grab.go)")
+	}
+	defer response.Body.Close()
+
+	// use a read function to read the bytes from the body slice into the pic_data variable
+	pic_data, err := io.ReadAll(response.Body)
+	if err != nil {
+		fmt.Println("Error: Could not read image data from HTTP body (basic_grab.go)")
+	}
+
+	// generate random name and store the file in the test directory
+	output_file, _ := GenerateFilename("../test/")
+	os.WriteFile(output_file, pic_data, 0666)
+}
 
 // Worker pool size for scanning files concurrently
 const workerCount = 4
@@ -73,16 +197,137 @@ func (l *Logger) FlushTo(w io.Writer) {
 	l.buf.Reset()
 }
 
+// GrabFromURLList downloads images from a list of URLs
+func GrabFromURLList(urls []string, targetDir string) error {
+	// Create target directory if it doesn't exist
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("failed to create target directory: %v", err)
+	}
+
+	// Create a wait group to handle concurrent downloads
+	var wg sync.WaitGroup
+	errors := make(chan error, len(urls))
+
+	// Create a semaphore to limit concurrent downloads
+	sem := make(chan struct{}, 5) // Limit to 5 concurrent downloads
+
+	for _, url := range urls {
+		wg.Add(1)
+		go func(url string) {
+			defer wg.Done()
+
+			// Acquire semaphore
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			// Make HTTP request
+			response, err := http.Get(url)
+			if err != nil {
+				errors <- fmt.Errorf("failed to download %s: %v", url, err)
+				return
+			}
+			defer response.Body.Close()
+
+			// Generate random filename
+			filename, err := GenerateFilename(targetDir)
+			if err != nil {
+				errors <- fmt.Errorf("failed to generate filename for %s: %v", url, err)
+				return
+			}
+
+			// Create the file
+			out, err := os.Create(filename)
+			if err != nil {
+				errors <- fmt.Errorf("failed to create file %s: %v", filename, err)
+				return
+			}
+			defer out.Close()
+
+			// Copy the data to the file
+			_, err = io.Copy(out, response.Body)
+			if err != nil {
+				errors <- fmt.Errorf("failed to write to file %s: %v", filename, err)
+				return
+			}
+
+			fmt.Printf("Successfully downloaded: %s -> %s\n", url, filename)
+		}(url)
+	}
+
+	// Wait for all downloads to complete
+	wg.Wait()
+	close(errors)
+
+	// Collect any errors
+	var errorList []error
+	for err := range errors {
+		errorList = append(errorList, err)
+	}
+
+	if len(errorList) > 0 {
+		return fmt.Errorf("encountered %d errors during download: %v", len(errorList), errorList)
+	}
+
+	return nil
+}
+
 func main() {
+	// Add new flags for URL processing
 	dirPtr := flag.String("dir", "", "Directory of PNG files to scan")
 	filePtr := flag.String("file", "", "Single PNG file to scan")
+	urlFilePtr := flag.String("urlfile", "", "File containing URLs to download and scan")
+	urlPtr := flag.String("url", "", "Single URL to download and scan")
+	outputDirPtr := flag.String("outdir", "images", "Directory to store downloaded images")
 	sequentialPtr := flag.Bool("seq", true, "Use sequential processing (default: true)")
 	flag.Parse()
 
-	if *dirPtr == "" && *filePtr == "" {
+	// Create output directory if it doesn't exist
+	if *urlFilePtr != "" || *urlPtr != "" {
+		if err := os.MkdirAll(*outputDirPtr, 0755); err != nil {
+			log.Fatalf("Failed to create output directory: %v", err)
+		}
+	}
+
+	// Handle URL file input
+	if *urlFilePtr != "" {
+		// Read URLs from file
+		content, err := os.ReadFile(*urlFilePtr)
+		if err != nil {
+			log.Fatalf("Failed to read URL file: %v", err)
+		}
+
+		urls := strings.Split(strings.TrimSpace(string(content)), "\n")
+		fmt.Printf("Downloading %d images from URLs...\n", len(urls))
+
+		if err := GrabFromURLList(urls, *outputDirPtr); err != nil {
+			log.Printf("Warning: Some downloads failed: %v", err)
+		}
+
+		// Set directory pointer to output directory for scanning
+		dirPtr = outputDirPtr
+	}
+
+	// Handle single URL input
+	if *urlPtr != "" {
+		urls := []string{*urlPtr}
+		fmt.Printf("Downloading image from URL: %s\n", *urlPtr)
+
+		if err := GrabFromURLList(urls, *outputDirPtr); err != nil {
+			log.Fatalf("Failed to download image: %v", err)
+		}
+
+		// Set directory pointer to output directory for scanning
+		dirPtr = outputDirPtr
+	}
+
+	// Proceed with normal scanning
+	if *dirPtr == "" && *filePtr == "" && *urlFilePtr == "" && *urlPtr == "" {
 		fmt.Println("Usage:")
 		fmt.Println("  detect-stego -dir <directory> [-seq=false]")
-		fmt.Println("  detect-stego -file <pngfile>")
+		fmt.Println("  detect-stego -file <imagefile>")
+		fmt.Println("  detect-stego -urlfile <file-with-urls>")
+		fmt.Println("  detect-stego -url <single-url>")
+		fmt.Println("  detect-stego -outdir <output-directory> (default: images)")
 		os.Exit(1)
 	}
 
@@ -95,7 +340,7 @@ func main() {
 		} else {
 			results = scanDirectoryConcurrent(*dirPtr)
 		}
-	} else {
+	} else if *filePtr != "" {
 		result := scanFile(*filePtr)
 		results.Results = append(results.Results, result)
 		results.TotalFiles = 1
@@ -179,7 +424,7 @@ func scanDirectoryConcurrent(dirPath string) ScanResults {
 		}
 		if !info.IsDir() {
 			ext := strings.ToLower(filepath.Ext(info.Name()))
-			if ext == ".png" || ext == ".jpg" || ext == ".jpeg" {
+			if ext == ".png" || ext == "..jpg" || ext == ".jpeg" {
 				files = append(files, path)
 			}
 		}
