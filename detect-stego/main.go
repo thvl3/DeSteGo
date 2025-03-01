@@ -3,6 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
+	_ "image/jpeg"
+	_ "image/png"
 	"log"
 	"os"
 	"path/filepath"
@@ -138,4 +140,11 @@ func scanFile(filename string) {
 				r.Mask.RBits, r.Mask.GBits, r.Mask.BBits, len(r.Data))
 		}
 	}
+}
+
+func bitOrderName(order BitOrder) string {
+	if order == LSBFirst {
+		return "LSB first"
+	}
+	return "MSB first"
 }
