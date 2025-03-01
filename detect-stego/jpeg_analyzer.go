@@ -14,7 +14,7 @@ import (
 // JPEG markers
 const (
 	markerPrefix = 0xFF
-	markerSOI    = 0xD8 // Start Of Image
+	jMarkerSOI   = 0xD8 // Start Of Image
 	markerAPP0   = 0xE0 // JFIF APP0 marker
 	markerAPP1   = 0xE1 // EXIF APP1 marker
 	markerDQT    = 0xDB // Define Quantization Table
@@ -60,7 +60,7 @@ func ExtractJPEGMetadata(filename string) (*JPEGMetadata, error) {
 		return nil, err
 	}
 
-	if b1 != 0xFF || b2 != markerSOI {
+	if b1 != 0xFF || b2 != jMarkerSOI {
 		return nil, fmt.Errorf("not a valid JPEG file")
 	}
 
@@ -377,38 +377,63 @@ func hasAbnormalMarkerSequence(markers []byte) bool {
 
 // hasModifiedQuantizationValues checks if a quantization table has been manipulated
 func hasModifiedQuantizationValues(table []byte) bool {
-	// Improved version with better heuristics
+	if len(table) < 64 {
+		return false
+	}
 
-	// Check for unusual patterns in the table
-	zeroCount := 0
-	oneCount := 0
-	evenOddDiffs := 0 // Count differences between adjacent values
+	// Count statistical anomalies
+	anomalies := 0
 
-	for i, val := range table {
-		if val == 0 {
-			zeroCount++
-		}
-		if val == 1 {
-			oneCount++
-		}
-
-		// Compare with adjacent values
-		if i > 0 && (val%2) != (table[i-1]%2) {
-			evenOddDiffs++
+	// 1. Check LSB distribution
+	lsbOnes := 0
+	for _, val := range table {
+		if val&1 == 1 {
+			lsbOnes++
 		}
 	}
 
-	// If more than 10% of values are zero or 1, might indicate manipulation
-	if float64(zeroCount)/float64(len(table)) > 0.1 || float64(oneCount)/float64(len(table)) > 0.15 {
-		return true
+	// JSteg typically makes LSB distribution more uniform
+	lsbRatio := float64(lsbOnes) / float64(len(table))
+	if lsbRatio > 0.45 && lsbRatio < 0.55 {
+		anomalies++
 	}
 
-	// If there's a highly regular pattern of even/odd values
-	if float64(evenOddDiffs)/float64(len(table)-1) > 0.8 {
-		return true
+	// 2. Check for unusual value patterns
+	for i := 0; i < len(table)-1; i++ {
+		// JSteg often creates regular patterns in adjacent values
+		if math.Abs(float64(table[i])-float64(table[i+1])) == 1 {
+			anomalies++
+		}
 	}
 
-	return false
+	// 3. Check for deviation from standard JPEG distributions
+	// JPEG usually has higher values in upper-left corner
+	upperLeft := float64(table[0]+table[1]+table[8]+table[9]) / 4
+	lowerRight := float64(table[54]+table[55]+table[62]+table[63]) / 4
+	if upperLeft < lowerRight {
+		anomalies++
+	}
+
+	// 4. Check entropy of coefficient differences
+	diffs := make([]uint8, len(table)-1)
+	for i := 0; i < len(table)-1; i++ {
+		diff := int(table[i+1]) - int(table[i])
+		// Convert to absolute value and clamp to uint8 range
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff > 255 {
+			diff = 255
+		}
+		diffs[i] = uint8(diff)
+	}
+
+	entropy := calculateDifferenceEntropy(diffs)
+	if entropy > 4.0 { // Higher entropy suggests modification
+		anomalies++
+	}
+
+	return anomalies >= 2
 }
 
 // DetectJSteg checks for signs of JSteg steganography
@@ -629,7 +654,7 @@ func identifyKnownSegments(data []byte) []segment {
 			markerType := data[i+1]
 
 			// Skip markers that don't have a length field
-			if markerType == markerSOI || markerType == markerEOI {
+			if markerType == jMarkerSOI || markerType == markerEOI {
 				continue
 			}
 
