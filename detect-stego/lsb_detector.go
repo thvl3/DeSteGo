@@ -6,8 +6,9 @@ import (
 	"strings"
 )
 
-// LSBDistribution holds statistics about the distribution of LSB bits in an image
-type LSBDistribution struct {
+// LSBDistributionL is the LSB distribution for basic detection
+// Renamed to avoid conflict with statistical_analysis.go
+type LSBDistributionL struct {
 	TotalPixels  int
 	ZeroBits     int
 	OneBits      int
@@ -60,7 +61,7 @@ func DetectJSLSB(img image.Image) bool {
 }
 
 // AnalyzeLSBDistribution analyzes the distribution of LSB values across channels
-func AnalyzeLSBDistribution(img image.Image) LSBDistribution {
+func AnalyzeLSBDistribution(img image.Image) LSBDistributionL {
 	bounds := img.Bounds()
 	width, height := bounds.Dx(), bounds.Dy()
 
@@ -70,7 +71,7 @@ func AnalyzeLSBDistribution(img image.Image) LSBDistribution {
 	bZeros, bOnes := 0, 0
 	aZeros, aOnes := 0, 0
 
-	result := LSBDistribution{
+	result := LSBDistributionL{
 		TotalPixels: width * height,
 		ChannelStats: map[string]ChannelLSBStats{
 			"R": {},

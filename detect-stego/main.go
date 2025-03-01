@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"image"
@@ -10,12 +12,353 @@ import (
 	_ "image/png"
 	"io"
 	"log"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
+
+// Color constants
+const (
+	colorReset  = "\033[0m"
+	colorRed    = "\033[31m"
+	colorGreen  = "\033[32m"
+	colorYellow = "\033[33m"
+	colorBlue   = "\033[34m"
+	colorPurple = "\033[35m"
+	colorCyan   = "\033[36m"
+	colorWhite  = "\033[37m"
+	colorBold   = "\033[1m"
+)
+
+// Colored output helpers
+func printInfo(format string, args ...interface{}) {
+	fmt.Printf(colorBlue+"[*] "+format+colorReset, args...)
+}
+
+func printSuccess(format string, args ...interface{}) {
+	fmt.Printf(colorGreen+"[+] "+format+colorReset, args...)
+}
+
+func printWarning(format string, args ...interface{}) {
+	fmt.Printf(colorYellow+"[!] "+format+colorReset, args...)
+}
+
+func printError(format string, args ...interface{}) {
+	fmt.Printf(colorRed+"[-] "+format+colorReset, args...)
+}
+
+func printAlert(format string, args ...interface{}) {
+	fmt.Printf(colorRed+colorBold+"[!!!] "+format+colorReset, args...)
+}
+
+// moveFiles moves all PNG and JPG files from subdirectories to the target directory
+func moveFiles(rootDir string) error {
+	return filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		// Check if file is PNG or JPG
+		if !info.IsDir() && (filepath.Ext(path) == ".png" || filepath.Ext(path) == ".jpg" || filepath.Ext(path) == ".jpeg") {
+			destPath := filepath.Join(rootDir, filepath.Base(path))
+			fmt.Printf("Moving: %s -> %s\n", path, destPath)
+			err := os.Rename(path, destPath) // Move file
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// removeEmptyDirsRecursively keeps deleting empty folders until none remain
+func removeEmptyDirsRecursively(rootDir string) error {
+	removed := true
+	for removed { // Keep looping until no more empty dirs are deleted
+		removed = false
+		filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				files, err := os.ReadDir(path)
+				if err != nil {
+					return err
+				}
+				if len(files) == 0 && path != rootDir {
+					fmt.Printf("Removing empty folder: %s\n", path)
+					os.Remove(path) // Delete empty directory
+					removed = true  // Mark as removed so we check again
+				}
+			}
+			return nil
+		})
+	}
+	return nil
+}
+
+// GalleryDownload uses gallery-dl to download images from a URL
+func GalleryDownload(url string, targetDir string) error {
+	// Create target directory if it doesn't exist
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("failed to create target directory: %v", err)
+	}
+
+	// Run gallery-dl command
+	printInfo("Running gallery-dl for URL: %s\n", url)
+	cmd := exec.Command("./gallery-dl.bin", url, "-d", targetDir)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("gallery-dl failed: %v", err)
+	}
+
+	// Move all images to the root of targetDir
+	if err := moveFiles(targetDir); err != nil {
+		return fmt.Errorf("failed to organize files: %v", err)
+	}
+
+	// Clean up empty directories
+	if err := removeEmptyDirsRecursively(targetDir); err != nil {
+		return fmt.Errorf("failed to clean up directories: %v", err)
+	}
+
+	printSuccess("Gallery download completed successfully\n")
+	return nil
+}
+
+func main() {
+	// Add new flags for URL processing
+	dirPtr := flag.String("dir", "", "Directory of PNG files to scan")
+	filePtr := flag.String("file", "", "Single PNG file to scan")
+	urlFilePtr := flag.String("urlfile", "", "File containing gallery URLs to download and scan")
+	urlPtr := flag.String("url", "", "Single gallery URL to download and scan")
+	outputDirPtr := flag.String("outdir", "images", "Directory to store downloaded images")
+	sequentialPtr := flag.Bool("seq", true, "Use sequential processing (default: true)")
+	flag.Parse()
+
+	// Create output directory if it doesn't exist
+	if (*urlFilePtr != "" || *urlPtr != "") && *outputDirPtr != "" {
+		if err := os.MkdirAll(*outputDirPtr, 0755); err != nil {
+			log.Fatalf("Failed to create output directory: %v", err)
+		}
+	}
+
+	// Handle URL file input
+	if *urlFilePtr != "" {
+		// Read URLs from file
+		content, err := os.ReadFile(*urlFilePtr)
+		if err != nil {
+			log.Fatalf("Failed to read URL file: %v", err)
+		}
+
+		// Split URLs and filter empty lines
+		urls := strings.Split(string(content), "\n")
+		var validURLs []string
+		for _, url := range urls {
+			if url = strings.TrimSpace(url); url != "" {
+				validURLs = append(validURLs, url)
+			}
+		}
+
+		printInfo("Processing %d gallery URLs...\n", len(validURLs))
+
+		for _, url := range validURLs {
+			if err := GalleryDownload(url, *outputDirPtr); err != nil {
+				printError("Failed to process gallery %s: %v\n", url, err)
+			}
+		}
+
+		// Force scan of the output directory
+		*dirPtr = *outputDirPtr
+	}
+
+	// Handle single URL input
+	if *urlPtr != "" {
+		printInfo("Processing gallery URL: %s\n", *urlPtr)
+
+		if err := GalleryDownload(*urlPtr, *outputDirPtr); err != nil {
+			printError("Failed to process gallery: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Force scan of the output directory
+		*dirPtr = *outputDirPtr
+	}
+
+	// Convert any JPEGs to PNGs before scanning
+	if *dirPtr != "" {
+		printInfo("Converting JPEG files to PNG format...\n")
+		converted, err := ConvertAllJPEGs(*dirPtr)
+		if err != nil {
+			printError("Error during conversion: %v\n", err)
+		} else if len(converted) > 0 {
+			printSuccess("Converted %d files to PNG format\n", len(converted))
+		}
+	} else if *filePtr != "" && (strings.HasSuffix(strings.ToLower(*filePtr), ".jpg") ||
+		strings.HasSuffix(strings.ToLower(*filePtr), ".jpeg")) {
+		printInfo("Converting JPEG file to PNG format...\n")
+		newFile, err := ConvertToPNG(*filePtr)
+		if err != nil {
+			printError("Failed to convert file: %v\n", err)
+			os.Exit(1)
+		}
+		*filePtr = newFile
+		printSuccess("Converted to %s\n", newFile)
+	}
+
+	// Proceed with normal scanning
+	if *dirPtr == "" && *filePtr == "" && *urlFilePtr == "" && *urlPtr == "" {
+		fmt.Println("Usage:")
+		fmt.Println("  detect-stego -dir <directory> [-seq=false]")
+		fmt.Println("  detect-stego -file <imagefile>")
+		fmt.Println("  detect-stego -urlfile <file-with-urls>")
+		fmt.Println("  detect-stego -url <single-url>")
+		fmt.Println("  detect-stego -outdir <output-directory> (default: images)")
+		os.Exit(1)
+	}
+
+	var results ScanResults
+
+	// Run appropriate scan mode
+	if *dirPtr != "" {
+		// Ensure we wait a moment for files to be written
+		time.Sleep(time.Second)
+
+		if *sequentialPtr {
+			results = scanDirectorySequential(*dirPtr)
+		} else {
+			results = scanDirectoryConcurrent(*dirPtr)
+		}
+	} else if *filePtr != "" {
+		result := scanFile(*filePtr)
+		results.Results = append(results.Results, result)
+		results.TotalFiles = 1
+		switch result.Level {
+		case Clean:
+			results.CleanFiles++
+		case Suspicious:
+			results.Suspicious++
+		case ConfirmedC2:
+			results.ConfirmedC2++
+		}
+	}
+
+	// Print final summary
+	printSummary(&results)
+}
+
+// Generate a random filename
+func GenerateFilename(dir string) (string, error) {
+	fp_buffer := make([]byte, 16)
+	_, errr := rand.Read(fp_buffer)
+	if errr != nil {
+		fmt.Println("Error: Could not generate random filename (basic_grab.go)")
+	}
+	filename := hex.EncodeToString(fp_buffer)
+	fullpath := dir + filename + ".jpg"
+	// check its stats with os; if it doesn't return an error (meaning the file exists), run it back to ensure no duplicates
+	if _, err := os.Stat(fullpath); err == nil {
+		return GenerateFilename(dir)
+	}
+	return fullpath, nil
+}
+
+// GrabFromURL modified to handle various response types
+func GrabFromURL(url string, targetDir string) error {
+	// Create an HTTP client with redirects enabled
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return nil
+		},
+	}
+
+	// Make HTTP request
+	response, err := client.Get(url)
+	if err != nil {
+		return fmt.Errorf("HTTP request failed: %v", err)
+	}
+	defer response.Body.Close()
+
+	// Check content type
+	contentType := response.Header.Get("Content-Type")
+	if !strings.Contains(contentType, "image/") {
+		return fmt.Errorf("not an image: %s", contentType)
+	}
+
+	// Generate random filename with correct path joining
+	buffer := make([]byte, 16)
+	if _, err := rand.Read(buffer); err != nil {
+		return fmt.Errorf("failed to generate random filename: %v", err)
+	}
+
+	// Determine file extension based on content type
+	ext := ".jpg"
+	if strings.Contains(contentType, "png") {
+		ext = ".png"
+	}
+
+	filename := filepath.Join(targetDir, fmt.Sprintf("%x%s", buffer, ext))
+
+	// Create the file
+	out, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("failed to create file %s: %v", filename, err)
+	}
+	defer out.Close()
+
+	// Copy the data to the file
+	_, err = io.Copy(out, response.Body)
+	if err != nil {
+		os.Remove(filename) // Clean up on error
+		return fmt.Errorf("failed to write image data: %v", err)
+	}
+
+	fmt.Printf("Successfully downloaded: %s -> %s\n", url, filepath.Base(filename))
+	return nil
+}
+
+// main grab function, meant to use with direct image urls
+func GrabFromURLList(urls []string, targetDir string) error {
+	// Create target directory if it doesn't exist
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("failed to create target directory: %v", err)
+	}
+
+	// Filter out empty URLs
+	var validURLs []string
+	for _, url := range urls {
+		if url = strings.TrimSpace(url); url != "" {
+			validURLs = append(validURLs, url)
+		}
+	}
+
+	if len(validURLs) == 0 {
+		return fmt.Errorf("no valid URLs found")
+	}
+
+	// Process URLs one at a time to avoid rate limiting
+	var errors []error
+	for _, url := range validURLs {
+		if err := GrabFromURL(url, targetDir); err != nil {
+			errors = append(errors, fmt.Errorf("failed to download %s: %v", url, err))
+		}
+		// Add a small delay between requests
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("encountered %d errors during download: %v", len(errors), errors)
+	}
+
+	return nil
+}
 
 // Worker pool size for scanning files concurrently
 const workerCount = 4
@@ -37,12 +380,17 @@ func init() {
 	for scanner.Scan() {
 		cmd := strings.TrimSpace(scanner.Text())
 		if cmd != "" {
+			// Skip "df" and "DF" commands to avoid false positives
+			if cmd == "df" || cmd == "DF" {
+				continue
+			}
 			shellCommands = append(shellCommands, regexp.QuoteMeta(cmd))
 		}
 	}
 
-	// Create regex pattern from commands
-	pattern := fmt.Sprintf(`(?i)(%s)`, strings.Join(shellCommands, "|"))
+	// Create regex pattern from commands with word boundaries
+	// Add word boundaries to avoid matching substrings inside other words
+	pattern := fmt.Sprintf(`(?i)\b(%s)\b`, strings.Join(shellCommands, "|"))
 	commandRegex = regexp.MustCompile(pattern)
 }
 
@@ -71,46 +419,6 @@ func (l *Logger) FlushTo(w io.Writer) {
 	defer l.mu.Unlock()
 	w.Write(l.buf.Bytes())
 	l.buf.Reset()
-}
-
-func main() {
-	dirPtr := flag.String("dir", "", "Directory of PNG files to scan")
-	filePtr := flag.String("file", "", "Single PNG file to scan")
-	sequentialPtr := flag.Bool("seq", true, "Use sequential processing (default: true)")
-	flag.Parse()
-
-	if *dirPtr == "" && *filePtr == "" {
-		fmt.Println("Usage:")
-		fmt.Println("  detect-stego -dir <directory> [-seq=false]")
-		fmt.Println("  detect-stego -file <pngfile>")
-		os.Exit(1)
-	}
-
-	var results ScanResults
-
-	// Run appropriate scan mode
-	if *dirPtr != "" {
-		if *sequentialPtr {
-			results = scanDirectorySequential(*dirPtr)
-		} else {
-			results = scanDirectoryConcurrent(*dirPtr)
-		}
-	} else {
-		result := scanFile(*filePtr)
-		results.Results = append(results.Results, result)
-		results.TotalFiles = 1
-		switch result.Level {
-		case Clean:
-			results.CleanFiles++
-		case Suspicious:
-			results.Suspicious++
-		case ConfirmedC2:
-			results.ConfirmedC2++
-		}
-	}
-
-	// Print final summary
-	printSummary(&results)
 }
 
 func gatherImageFiles(dirPath string) []string {
@@ -162,8 +470,6 @@ func scanDirectorySequential(dirPath string) ScanResults {
 		updateResults(&results, result)
 	}
 
-	// Print final summary after all detailed output
-	printSummary(&results)
 	return results
 }
 
@@ -179,7 +485,7 @@ func scanDirectoryConcurrent(dirPath string) ScanResults {
 		}
 		if !info.IsDir() {
 			ext := strings.ToLower(filepath.Ext(info.Name()))
-			if ext == ".png" || ext == ".jpg" || ext == ".jpeg" {
+			if ext == "..jpg" || ext == ".jpeg" {
 				files = append(files, path)
 			}
 		}
@@ -225,8 +531,6 @@ func scanDirectoryConcurrent(dirPath string) ScanResults {
 	wg.Wait()
 	close(resultChan)
 
-	// Print final summary after all detailed output
-	printSummary(&results)
 	return results
 }
 
@@ -245,20 +549,27 @@ func scanFileBuffered(filename string, logger *Logger) {
 
 	// Run appropriate detection methods based on format
 	if format == "png" {
-		runChiSquareAnalysis(img, logger, nil)
+		runStatisticalAnalysis(img, logger, nil)
 		runLSBAnalysis(img, logger, nil)
 		runJSLSBDetection(img, logger, nil)
 	} else if format == "jpeg" {
-		runJPEGAnalysis(img, filename, logger, nil)
+		runJPEGAnalysis(filename, logger, nil)
 	}
 }
 
-// scanFile performs all detection steps on a single file with direct output
+// Scan a file for steganography, analyzing both JPEG and PNG aspects
 func scanFile(filename string) ScanResult {
 	result := ScanResult{Filename: filename}
 
 	fmt.Printf("\n--- Scanning %s ---\n", filename)
 
+	// First analyze original file if it's a JPEG
+	if strings.HasSuffix(strings.ToLower(filename), ".jpg") ||
+		strings.HasSuffix(strings.ToLower(filename), ".jpeg") {
+		runJPEGAnalysis(filename, nil, &result)
+	}
+
+	// Then analyze as PNG (either original PNG or converted JPEG)
 	img, err := LoadImage(filename)
 	if err != nil {
 		fmt.Printf("[-] Failed to open/parse image: %v\n", err)
@@ -266,81 +577,103 @@ func scanFile(filename string) ScanResult {
 		return result
 	}
 
-	format, _ := GetImageFormat(filename)
-	fmt.Printf("Image format: %s\n", format)
+	// Run PNG analysis with statistical analysis instead of Chi-Square
+	runStatisticalAnalysis(img, nil, &result)
+	runLSBAnalysis(img, nil, &result)
+	runJSLSBDetection(img, nil, &result)
 
-	// Run appropriate detection methods based on format
-	if format == "png" {
-		runChiSquareAnalysis(img, nil, &result)
-		runLSBAnalysis(img, nil, &result)
-		runJSLSBDetection(img, nil, &result)
-	} else if format == "jpeg" {
-		runJPEGAnalysis(img, filename, nil, &result)
-	}
+	// Filter out low-confidence findings
+	result.Findings = filterFindings(result.Findings)
 
 	return result
 }
 
-// runChiSquareAnalysis runs Chi-Square tests on the image
-func runChiSquareAnalysis(img image.Image, logger *Logger, result *ScanResult) {
-	output := func(format string, args ...interface{}) {
-		if logger != nil {
-			logger.Printf(format, args...)
-		} else {
-			fmt.Printf(format, args...)
+// Filter findings to reduce false positives
+func filterFindings(findings []Finding) []Finding {
+	var filtered []Finding
+
+	for _, f := range findings {
+		// Skip low-confidence LSB findings unless they have strong indicators
+		if strings.Contains(f.Description, "LSB") {
+			// Require higher confidence for LSB-based detections
+			if f.Confidence < 9 {
+				continue
+			}
+
+			// Additional validation for LSB findings
+			if !containsStrongIndicators(f.Details) {
+				continue
+			}
 		}
-	}
 
-	//
-	// 1) Run a Chi-Square analysis on R, G, B channels separately.
-	//
-	chiR := ChiSquareLSB(img, 'R')
-	chiG := ChiSquareLSB(img, 'G')
-	chiB := ChiSquareLSB(img, 'B')
-
-	output("\n=== Chi-Square Analysis ===\n")
-
-	// Better interpretation of chi-square values
-	// Very low or very high values can both indicate steganography
-	interpretChiSquare := func(chi float64, channel byte) {
-		if chi < 0.5 {
-			output("[!] Chi-square result (%c) = %.4f => Suspiciously uniform (likely steganography)\n", channel, chi)
-		} else if chi > 10.0 {
-			output("[!] Chi-square result (%c) = %.4f => Suspiciously non-uniform (possible structured steganography)\n", channel, chi)
-		} else {
-			output("[ ] Chi-square result (%c) = %.4f => Within normal range\n", channel, chi)
+		// Skip findings that are common in normal images
+		if isCommonPattern(f.Description, f.Details) {
+			continue
 		}
+
+		filtered = append(filtered, f)
 	}
 
-	interpretChiSquare(chiR, 'R')
-	interpretChiSquare(chiG, 'G')
-	interpretChiSquare(chiB, 'B')
-
-	// Calculate the average chi-square across channels
-	avgChi := (chiR + chiG + chiB) / 3.0
-	if avgChi < 0.7 || avgChi > 8.0 {
-		output("[!] Average Chi-square = %.4f => Suspicious LSB distributions detected\n", avgChi)
-	}
-
-	// Then add findings for the summary
-	if avgChi < 0.5 {
-		result.AddFinding(
-			"Highly uniform LSB distribution",
-			9,
-			Suspicious,
-			fmt.Sprintf("Chi-square avg=%.4f", avgChi),
-		)
-	} else if avgChi > 10.0 {
-		result.AddFinding(
-			"Abnormal LSB distribution",
-			7,
-			Suspicious,
-			fmt.Sprintf("Chi-square avg=%.4f", avgChi),
-		)
-	}
+	return filtered
 }
 
-// runLSBAnalysis performs traditional LSB extraction with multiple methods
+// Check if details contain strong indicators of steganography
+func containsStrongIndicators(details string) bool {
+	strongIndicators := []string{
+		"shell", "password", "secret", "admin",
+		"http://", "https://", "ftp://",
+		".exe", ".dll", ".sh", ".cmd",
+	}
+
+	details = strings.ToLower(details)
+
+	for _, indicator := range strongIndicators {
+		if strings.Contains(details, indicator) {
+			return true
+		}
+	}
+
+	if strings.Contains(details, "entropy") {
+		if value := extractEntropyValue(details); value > 7.9 {
+			return true
+		}
+	}
+
+	return false
+}
+
+// Check if a pattern is common in normal images (to filter false positives)
+func isCommonPattern(description, details string) bool {
+	commonPatterns := []string{
+		"slight variation in LSB",
+		"minor statistical anomaly",
+		"low entropy distribution",
+		"standard JPEG pattern",
+	}
+
+	text := strings.ToLower(description + " " + details)
+	for _, pattern := range commonPatterns {
+		if strings.Contains(text, strings.ToLower(pattern)) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// Extract entropy value from text string
+func extractEntropyValue(text string) float64 {
+	re := regexp.MustCompile(`entropy=(\d+\.\d+)`)
+	matches := re.FindStringSubmatch(text)
+	if len(matches) > 1 {
+		if value, err := strconv.ParseFloat(matches[1], 64); err == nil {
+			return value
+		}
+	}
+	return 0
+}
+
+// Run LSB analysis on an image
 func runLSBAnalysis(img image.Image, logger *Logger, result *ScanResult) {
 	output := func(format string, args ...interface{}) {
 		if logger != nil {
@@ -352,15 +685,77 @@ func runLSBAnalysis(img image.Image, logger *Logger, result *ScanResult) {
 
 	output("\n=== LSB Brute Force Analysis ===\n")
 
-	// Create a progress callback function
+	// Add more comprehensive LSB extraction attempts
+	extractLSB := func(mask ChannelMask) []byte {
+		// Try different bit orders and methods
+		data := ExtractBitsDirectly(img, mask)
+		if len(data) > 0 && IsASCIIPrintable(data) {
+			return data
+		}
+
+		// Try reverse bit order
+		data = ExtractBitsReverse(img, mask)
+		if len(data) > 0 && IsASCIIPrintable(data) {
+			return data
+		}
+
+		return nil
+	}
+
+	// Try common LSB patterns
+	masks := []ChannelMask{
+		{RBits: 1, GBits: 0, BBits: 0, ABits: 0}, // R channel
+		{RBits: 0, GBits: 1, BBits: 0, ABits: 0}, // G channel
+		{RBits: 0, GBits: 0, BBits: 1, ABits: 0}, // B channel
+		{RBits: 1, GBits: 1, BBits: 1, ABits: 0}, // All channels
+		{RBits: 1, GBits: 1, BBits: 0, ABits: 0}, // RG channels
+		{RBits: 0, GBits: 1, BBits: 1, ABits: 0}, // GB channels
+	}
+
+	foundData := false
+	for _, mask := range masks {
+		data := extractLSB(mask)
+		if data != nil {
+			foundData = true
+			output("[+] Found hidden data using mask R:%d G:%d B:%d:\n",
+				mask.RBits, mask.GBits, mask.BBits)
+			output("    %q\n", string(data))
+
+			// Check for C2 traffic or other suspicious content
+			if isC2, reason := IsLikelyC2Traffic(string(data)); isC2 {
+				result.AddFinding(
+					"Found potential C2 traffic in LSB data",
+					10,
+					ConfirmedC2,
+					reason,
+				)
+			} else if IsSuspiciousText(string(data)) {
+				result.AddFinding(
+					"Found suspicious text in LSB data",
+					7,
+					Suspicious,
+					fmt.Sprintf("Text: %s", string(data)),
+				)
+			}
+		}
+	}
+
+	if !foundData {
+		output("[ ] No readable LSB data found\n")
+	}
+
+	// Create a progress callback function that only prints on major milestones
 	progressCb := func(percentComplete float64, message string) {
-		if logger != nil {
-			logger.Printf("\r[%.1f%%] %s", percentComplete, message)
-		} else {
-			fmt.Printf("\r[%.1f%%] %s", percentComplete, message)
-			// Ensure console flushes the output
-			if message == "" || message[len(message)-1] == '\n' {
-				fmt.Print("\n")
+		// Only print progress at 25%, 50%, 75% and 100%
+		if percentComplete == 0 || percentComplete >= 100 ||
+			int(percentComplete)%25 == 0 {
+			if logger != nil {
+				logger.Printf("\rLSB Analysis: %.0f%% complete", percentComplete)
+			} else {
+				fmt.Printf("\rLSB Analysis: %.0f%% complete", percentComplete)
+			}
+			if percentComplete >= 100 {
+				fmt.Println() // Add newline at end
 			}
 		}
 	}
@@ -425,39 +820,7 @@ func runLSBAnalysis(img image.Image, logger *Logger, result *ScanResult) {
 	}
 }
 
-// tryExtractChannelMask tries to extract data using a specific channel mask
-func tryExtractChannelMask(img image.Image, mask ChannelMask, useLength bool,
-	progressCb ProgressCallback, output func(string, ...interface{})) {
-
-	var data []byte
-	var err error
-
-	if useLength {
-		// Try extracting with length prefix
-		data, err = ExtractData(img, mask, LSBFirst, progressCb)
-	} else {
-		// Try extracting without length prefix
-		data = ExtractLSBNoLength(img, mask, LSBFirst, progressCb)
-		if len(data) == 0 {
-			err = fmt.Errorf("no data extracted")
-		}
-	}
-
-	if err == nil && len(data) > 0 {
-		if IsASCIIPrintable(data) {
-			extractionType := "direct"
-			if useLength {
-				extractionType = "length-based"
-			}
-			output("\n[+] Found hidden ASCII text using %s extraction (R:%d G:%d B:%d A:%d):\n%q\n",
-				extractionType,
-				mask.RBits, mask.GBits, mask.BBits, mask.ABits,
-				string(data))
-		}
-	}
-}
-
-// runJSLSBDetection runs specialized detection for JavaScript LSB embedding
+// Run JavaScript LSB detection
 func runJSLSBDetection(img image.Image, logger *Logger, result *ScanResult) {
 	output := func(format string, args ...interface{}) {
 		if logger != nil {
@@ -513,8 +876,8 @@ func runJSLSBDetection(img image.Image, logger *Logger, result *ScanResult) {
 	}
 }
 
-// runJPEGAnalysis performs JPEG-specific steganalysis
-func runJPEGAnalysis(img image.Image, filename string, logger *Logger, result *ScanResult) {
+// Run JPEG-specific analysis
+func runJPEGAnalysis(filename string, logger *Logger, result *ScanResult) {
 	output := func(format string, args ...interface{}) {
 		if logger != nil {
 			logger.Printf(format, args...)
@@ -524,157 +887,379 @@ func runJPEGAnalysis(img image.Image, filename string, logger *Logger, result *S
 	}
 
 	output("\n=== JPEG Analysis ===\n")
+	output("Starting analysis of %s\n", filepath.Base(filename))
 
-	// 1. Analyze JPEG metadata
-	jfifData, err := ExtractJPEGMetadata(filename)
+	// Extract metadata first
+	metadata, err := ExtractJPEGMetadata(filename)
 	if err != nil {
 		output("[-] Failed to extract JPEG metadata: %v\n", err)
+		result.AddFinding("Failed to extract JPEG metadata", 5, Suspicious, err.Error())
 		return
 	}
 
-	// 2. Check for signs of steganography
-	if isJPEGModified := DetectJPEGSteganography(jfifData); isJPEGModified {
-		output("[!] JPEG analysis suggests possible steganography\n")
-
-		// Check for specific steganography tools
-		if DetectJSteg(jfifData) {
-			output("[!] Detected possible JSteg steganography\n")
-		}
-
-		if DetectF5(jfifData) {
-			output("[!] Detected possible F5 steganography\n")
-		}
-
-		if DetectOutguess(jfifData) {
-			output("[!] Detected possible Outguess steganography\n")
-		}
-	} else {
-		output("[ ] No obvious signs of JPEG steganography detected in file structure\n")
-	}
-
-	// 2.5 NEW: Specific Steghide detection
-	output("\n=== StegHide Detection ===\n")
-	isStegHide, stegStats, err := DetectStegHide(filename)
-	if err != nil {
-		output("[-] Error during StegHide detection: %v\n", err)
-	} else if isStegHide {
-		output("[!] StegHide steganography detected (confidence: %d/10)\n", stegStats.ConfidenceScore)
-		output("    - Modified coefficients: %.1f%%\n", stegStats.ModifiedCoefficients*100)
-		output("    - Even/Odd coefficient ratio: %.2f (normal ~1.0)\n", stegStats.EvenOddRatio)
-		output("    - StegHide header detected: %v\n", stegStats.PotentialHeader)
-
-		// Try to extract information about the payload
-		payloadInfo, err := ExtractPotentialStegHidePayload(filename)
-		if err == nil && len(payloadInfo) > 0 {
-			output("[+] Payload information:\n%s\n", string(payloadInfo))
-		}
-	} else {
-		if stegStats.ConfidenceScore > 0 {
-			output("[-] Some StegHide indicators found, but below detection threshold (confidence: %d/10)\n",
-				stegStats.ConfidenceScore)
-		} else {
-			output("[ ] No evidence of StegHide steganography\n")
-		}
-	}
-
-	// 3. Look for plaintext steganography
-	output("\n=== JPEG Plaintext Search ===\n")
-	plaintextFindings, err := ScanForPlaintextStego(filename)
-	if err != nil {
-		output("[-] Error scanning for plaintext: %v\n", err)
-	} else if len(plaintextFindings) > 0 {
-		output("[!] Found %d potential plaintext message(s) in unexpected locations:\n", len(plaintextFindings))
-
-		for i, text := range plaintextFindings {
-			confidence := assessTextConfidence(text)
-
-			// Check for C2 traffic
-			if isC2, reason := IsLikelyC2Traffic(text); isC2 {
-				if result != nil {
-					result.AddFinding(
-						"Found potential C2 traffic in JPEG plaintext",
-						10,
-						ConfirmedC2,
-						reason,
-					)
-				}
-				output("[!!!] WARNING: Plaintext contains shell commands - likely C2 traffic!\n")
-			}
-
-			// Limit output length to avoid flooding the console
-			displayText := text
-			if len(displayText) > 100 {
-				displayText = displayText[:97] + "..."
-			}
-
-			output("    [%d] (Confidence: %d/10) %s\n", i+1, confidence, displayText)
-		}
-	} else {
-		output("[ ] No suspicious plaintext found in JPEG structure\n")
-	}
-
-	// 4. Check for polyglot files (JPEG combined with another format)
-	isPolyglot, otherFormat := ScanForPolyglotFile(filename)
-	if isPolyglot {
-		output("[!] File appears to be a polyglot - both JPEG and %s format\n", otherFormat)
-		output("    Polyglot files are often used to hide data\n")
-	}
-
-	// 5. Other JPEG-specific checks
-	output("\n=== JPEG File Structure Analysis ===\n")
+	// Basic file analysis
+	output("Dimensions: %dx%d\n", metadata.Width, metadata.Height)
+	output("Color components: %d\n", metadata.Components)
+	output("Progressive: %v\n", metadata.IsProgressive)
 
 	// Check for appended data
-	if hasAppendedData, dataSize := CheckAppendedData(filename); hasAppendedData {
-		output("[!] Found %d bytes of data appended after JPEG EOI marker\n", dataSize)
+	if metadata.HasAppendedData {
+		output("%s[!] Found %d bytes of appended data after JPEG EOF marker%s\n",
+			colorYellow, metadata.AppendedDataSize, colorReset)
+		result.AddFinding("Found appended data after EOF", 8, Suspicious,
+			fmt.Sprintf("Found %d bytes of appended data", metadata.AppendedDataSize))
+	}
 
-		// Try to extract and analyze the appended data
-		appendedData, err := ExtractAppendedData(filename)
-		if err == nil && len(appendedData) > 0 {
-			if IsASCIIPrintable(appendedData) {
-				output("[+] Appended data appears to be ASCII text:\n%s\n",
-					string(appendedData[:min(100, len(appendedData))]))
-				if len(appendedData) > 100 {
-					output("... (%d more bytes)\n", len(appendedData)-100)
-				}
-			} else {
-				entropy := ComputeEntropy(appendedData)
-				output("[+] Appended data is binary (%d bytes, entropy: %.2f)\n",
-					len(appendedData), entropy)
+	// Report quantization table analysis
+	output("\nAnalyzing quantization tables...\n")
+	modified, numTables := CheckQuantizationTables(metadata)
+	if modified {
+		output("%s[!] Detected modified quantization tables (%d tables)%s\n",
+			colorYellow, numTables, colorReset)
+		result.AddFinding("Modified quantization tables detected", 7, Suspicious,
+			fmt.Sprintf("Found %d modified tables", numTables))
+	} else {
+		output("[+] Quantization tables appear normal (%d tables)\n", numTables)
+	}
 
-				// Check for encoded text in the binary data
-				if containsEncodedBytes(appendedData) {
-					output("[!] Appended data appears to contain encoded text (possible base64/hex)\n")
+	// Run steganography detection
+	output("\nRunning steganalysis...\n")
+	stegResults, err := AnalyzeJPEG(filename)
+	if err != nil {
+		output("[-] Steganalysis failed: %v\n", err)
+	} else {
+		// Report detection results with confidence scores
+		if stegResults.JStegProbability > 0.2 {
+			output("%s[!] JSteg probability: %.1f%%%s\n",
+				colorYellow, stegResults.JStegProbability*100, colorReset)
+			if details, ok := stegResults.Details["JSteg"]; ok {
+				output("    %s\n", details)
+				if stegResults.JStegProbability > 0.4 {
+					result.AddFinding("JSteg steganography detected",
+						int(7+stegResults.JStegProbability*3), Suspicious,
+						fmt.Sprintf("Confidence: %.1f%%", stegResults.JStegProbability*100))
 				}
 			}
 		}
-	} else {
-		output("[ ] No data appended after JPEG EOI marker\n")
+
+		if stegResults.F5Probability > 0.2 {
+			output("%s[!] F5 probability: %.1f%%%s\n",
+				colorYellow, stegResults.F5Probability*100, colorReset)
+			if details, ok := stegResults.Details["F5"]; ok {
+				output("    %s\n", details)
+				if stegResults.F5Probability > 0.4 {
+					result.AddFinding("F5 steganography detected",
+						int(7+stegResults.F5Probability*3), Suspicious,
+						fmt.Sprintf("Confidence: %.1f%%", stegResults.F5Probability*100))
+				}
+			}
+		}
+
+		if stegResults.OutGuessProbability > 0.2 {
+			output("%s[!] OutGuess probability: %.1f%%%s\n",
+				colorYellow, stegResults.OutGuessProbability*100, colorReset)
+			if details, ok := stegResults.Details["OutGuess"]; ok {
+				output("    %s\n", details)
+				if stegResults.OutGuessProbability > 0.4 {
+					result.AddFinding("OutGuess steganography detected",
+						int(7+stegResults.OutGuessProbability*3), Suspicious,
+						fmt.Sprintf("Confidence: %.1f%%", stegResults.OutGuessProbability*100))
+				}
+			}
+		}
 	}
 
-	// Check for mismatched quantization tables
-	if hasModifiedTables, tableCount := CheckQuantizationTables(jfifData); hasModifiedTables {
-		output("[!] Detected non-standard quantization tables (%d tables)\n", tableCount)
-		output("    This may indicate steganographic manipulation\n")
-	} else {
-		output("[ ] Quantization tables appear standard\n")
-	}
+	// Look for hidden text
+	output("\nScanning for hidden text...\n")
+	findings, err := ScanForPlaintextStego(filename)
+	if err == nil && len(findings) > 0 {
+		output("%s[!] Found potential hidden text:%s\n", colorYellow, colorReset)
+		for _, text := range findings {
+			output("    > %s\n", text)
 
-	// Check comment sections
-	if len(jfifData.Comments) > 0 {
-		output("\n=== JPEG Comments Analysis ===\n")
-
-		for i, comment := range jfifData.Comments {
-			if len(comment) > 100 {
-				output("[!] Comment %d: Length=%d (suspicious if >100): %.100s...\n",
-					i+1, len(comment), comment)
+			// Check if the found text contains C2 indicators
+			if isC2, reason := IsLikelyC2Traffic(text); isC2 {
+				result.AddFinding(
+					"Found potential C2 traffic in hidden text",
+					10,
+					ConfirmedC2,
+					reason,
+				)
 			} else {
-				output("[+] Comment %d: %s\n", i+1, comment)
+				result.AddFinding(
+					"Found hidden text",
+					7,
+					Suspicious,
+					fmt.Sprintf("Text: %s", text),
+				)
+			}
+		}
+	}
+
+	// Check for polyglot files
+	if isPolyglot, format := ScanForPolyglotFile(filename); isPolyglot {
+		output("%s[!] File appears to be a polyglot - also contains %s format%s\n",
+			colorYellow, format, colorReset)
+		result.AddFinding(
+			"Polyglot file detected",
+			8,
+			Suspicious,
+			fmt.Sprintf("File also contains %s format", format))
+	}
+
+	output("\nAnalysis complete.\n")
+}
+
+// Check if text is suspicious
+func IsSuspiciousText(text string) bool {
+	lowered := strings.ToLower(text)
+
+	// Create word boundaries for these patterns to avoid false matches
+	suspiciousPatterns := []string{
+		"\\bpassword\\b", "\\bsecret\\b", "\\bkey\\b", "\\btoken\\b",
+		"\\badmin\\b", "\\broot\\b", "\\bshell\\b", "\\bbash\\b",
+		"http://", "https://", "ftp://",
+		"\\.exe\\b", "\\.dll\\b", "\\.sh\\b", "\\.bat\\b",
+	}
+
+	for _, pattern := range suspiciousPatterns {
+		re := regexp.MustCompile(pattern)
+		if re.MatchString(lowered) {
+			return true
+		}
+	}
+
+	// Check for very high entropy sections only
+	if ComputeEntropy([]byte(text)) > 7.2 { // Increased from 6.5
+		return true
+	}
+
+	return false
+}
+
+// Extract bits in reverse order
+func ExtractBitsReverse(img image.Image, mask ChannelMask) []byte {
+	bounds := img.Bounds()
+	var bytesBuilder bytes.Buffer
+	currentByte := byte(0)
+	bitCount := 0
+
+	// Extract bits in reverse order
+	for y := bounds.Max.Y - 1; y >= bounds.Min.Y; y-- {
+		for x := bounds.Max.X - 1; x >= bounds.Min.X; x-- {
+			r, g, b, a := img.At(x, y).RGBA()
+
+			if mask.RBits > 0 {
+				currentByte = (currentByte << 1) | byte(r>>8)&1
+				bitCount++
+			}
+			if mask.GBits > 0 {
+				currentByte = (currentByte << 1) | byte(g>>8)&1
+				bitCount++
+			}
+			if mask.BBits > 0 {
+				currentByte = (currentByte << 1) | byte(b>>8)&1
+				bitCount++
+			}
+			if mask.ABits > 0 {
+				currentByte = (currentByte << 1) | byte(a>>8)&1
+				bitCount++
+			}
+
+			if bitCount >= 8 {
+				bytesBuilder.WriteByte(currentByte)
+				currentByte = 0
+				bitCount = 0
+			}
+		}
+	}
+
+	return bytesBuilder.Bytes()
+}
+
+// Try to extract data using specific channel mask
+func tryExtractChannelMask(img image.Image, mask ChannelMask, useLength bool,
+	progressCb ProgressCallback, output func(string, ...interface{})) {
+	var data []byte
+	var err error
+
+	// Don't print the starting message
+	if useLength {
+		data, err = ExtractData(img, mask, LSBFirst, nil) // Pass nil for progress callback
+	} else {
+		data = ExtractLSBNoLength(img, mask, LSBFirst, nil) // Pass nil for progress callback
+		if len(data) == 0 {
+			err = fmt.Errorf("no data extracted")
+		}
+	}
+
+	// Only output if we found something
+	if err == nil && len(data) > 0 && IsASCIIPrintable(data) {
+		extractionType := "direct"
+		if useLength {
+			extractionType = "length-based"
+		}
+		output("\n[+] Found hidden ASCII text using %s extraction (R:%d G:%d B:%d A:%d):\n%q\n",
+			extractionType,
+			mask.RBits, mask.GBits, mask.BBits, mask.ABits,
+			string(data))
+	}
+}
+
+// Extract bits directly from image
+func ExtractBitsDirectly(img image.Image, mask ChannelMask) []byte {
+	bounds := img.Bounds()
+	var bytesBuilder bytes.Buffer
+	currentByte := byte(0)
+	bitCount := 0
+
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			r, g, b, a := img.At(x, y).RGBA()
+
+			// Extract LSB from each channel according to mask
+			if mask.RBits > 0 {
+				currentByte = (currentByte << 1) | byte(r>>8)&1
+				bitCount++
+			}
+			if mask.GBits > 0 {
+				currentByte = (currentByte << 1) | byte(g>>8)&1
+				bitCount++
+			}
+			if mask.BBits > 0 {
+				currentByte = (currentByte << 1) | byte(b>>8)&1
+				bitCount++
+			}
+			if mask.ABits > 0 {
+				currentByte = (currentByte << 1) | byte(a>>8)&1
+				bitCount++
+			}
+
+			// When we have 8 bits, add the byte to our result
+			if bitCount >= 8 {
+				// If the byte contains all nulls, we might be at the end
+				bytesBuilder.WriteByte(currentByte)
+				// Reset for next byte
+				currentByte = 0
+				bitCount = 0
+			}
+		}
+	}
+
+	return bytesBuilder.Bytes()
+}
+
+// Helper function to update scan results
+func updateResults(results *ScanResults, result ScanResult) {
+	results.Results = append(results.Results, result)
+	switch result.Level {
+	case Clean:
+		results.CleanFiles++
+	case Suspicious:
+		results.Suspicious++
+	case ConfirmedC2:
+		results.ConfirmedC2++
+	}
+}
+
+// Print summary of scan results
+func printSummary(results *ScanResults) {
+	fmt.Printf("\n" + colorBold + "=== Final Analysis Summary ===" + colorReset + "\n")
+	fmt.Printf("Total files scanned: %d\n", results.TotalFiles)
+	fmt.Printf("%sClean files: %d%s\n", colorGreen, results.CleanFiles, colorReset)
+
+	if results.Suspicious > 0 {
+		fmt.Printf("%sSuspicious files: %d%s\n", colorYellow, results.Suspicious, colorReset)
+	}
+
+	if results.ConfirmedC2 > 0 {
+		fmt.Printf("%sConfirmed C2 traffic: %d%s\n", colorRed, results.ConfirmedC2, colorReset)
+		printAlert("Files containing C2 traffic:\n")
+		for _, r := range results.Results {
+			if r.Level == ConfirmedC2 {
+				fmt.Printf("\n- %s\n", r.Filename)
+				fmt.Printf("  Commands found:\n")
+				for _, f := range r.Findings {
+					if f.Level == ConfirmedC2 && strings.Contains(f.Details, "Found shell commands:") {
+						// Extract and format the command list
+						cmds := strings.TrimPrefix(f.Details, "Found shell commands: [")
+						cmds = strings.TrimSuffix(cmds, "]")
+						cmdList := strings.Split(cmds, " ")
+						for _, cmd := range cmdList {
+							cmd = strings.Trim(cmd, "\",'`")
+							if cmd != "" {
+								fmt.Printf("    > %s\n", cmd)
+							}
+						}
+					}
+				}
+				// Show other C2 findings that aren't command matches
+				for _, f := range r.Findings {
+					if f.Level == ConfirmedC2 && !strings.Contains(f.Details, "Found shell commands:") {
+						fmt.Printf("  * %s (Confidence: %d/10)\n", f.Description, f.Confidence)
+						fmt.Printf("    Detail: %s\n", f.Details)
+					}
+				}
+			}
+		}
+	}
+
+	if results.Suspicious > 0 {
+		printWarning("\nSuspicious files requiring further investigation:\n")
+		for _, r := range results.Results {
+			if r.Level == Suspicious {
+				fmt.Printf("- %s\n", r.Filename)
+				// Only show high confidence findings in summary
+				for _, f := range r.Findings {
+					if f.Level == Suspicious && f.Confidence >= 7 {
+						fmt.Printf("  * %s (Confidence: %d/10)\n", f.Description, f.Confidence)
+					}
+				}
 			}
 		}
 	}
 }
 
-// assessTextConfidence rates how likely a string is to be an intentional hidden message
+// Check if text appears to be C2 traffic
+func IsLikelyC2Traffic(text string) (bool, string) {
+	matches := commandRegex.FindAllString(text, -1)
+	if len(matches) > 0 {
+		// Deduplicate matches
+		seen := make(map[string]bool)
+		var unique []string
+		for _, match := range matches {
+			if !seen[match] {
+				seen[match] = true
+				unique = append(unique, match)
+			}
+		}
+		return true, fmt.Sprintf("Found shell commands: %v", unique)
+	}
+
+	// Additional C2 indicators
+	if strings.Contains(strings.ToLower(text), "://") &&
+		(strings.Contains(strings.ToLower(text), ".exe") ||
+			strings.Contains(strings.ToLower(text), ".dll")) {
+		return true, "Found executable download URL"
+	}
+
+	if strings.Contains(strings.ToLower(text), "reverse") &&
+		strings.Contains(strings.ToLower(text), "shell") {
+		return true, "Found reverse shell pattern"
+	}
+
+	return false, ""
+}
+
+// Get minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// Assess how likely a text is to be an intentional hidden message
 func assessTextConfidence(text string) int {
 	// Start with baseline score
 	score := 5
@@ -725,154 +1310,92 @@ func assessTextConfidence(text string) int {
 	return score
 }
 
-// min returns the minimum of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// ExtractBitsDirectly extracts bits directly from the image without assuming a length prefix
-// This is now exported for use in multiple places
-func ExtractBitsDirectly(img image.Image, mask ChannelMask) []byte {
-	bounds := img.Bounds()
-	//var bits []byte
-	bytesBuilder := bytes.Buffer{}
-	currentByte := byte(0)
-	bitCount := 0
-
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			r, g, b, a := img.At(x, y).RGBA()
-
-			// Extract LSB from each channel according to mask
-			if mask.RBits > 0 {
-				currentByte = (currentByte << 1) | byte(r>>8)&1
-				bitCount++
+// Run the new statistical analysis
+func runStatisticalAnalysis(img image.Image, logger *Logger, result *ScanResult) {
+	defer (func() {
+		if r := recover(); r != nil {
+			fmt.Printf("Recovered from panic in statistical analysis: %v\n", r)
+			fmt.Println("Skipping statistical analysis for this image")
+			// Add error to results
+			if result != nil {
+				result.AddFinding("Statistical analysis error", 5, Suspicious, fmt.Sprintf("Panic: %v", r))
 			}
-			if mask.GBits > 0 {
-				currentByte = (currentByte << 1) | byte(g>>8)&1
-				bitCount++
-			}
-			if mask.BBits > 0 {
-				currentByte = (currentByte << 1) | byte(b>>8)&1
-				bitCount++
-			}
-			if mask.ABits > 0 {
-				currentByte = (currentByte << 1) | byte(a>>8)&1
-				bitCount++
-			}
+		}
+	})()
 
-			// When we have 8 bits, add the byte to our result
-			if bitCount >= 8 {
-				// If the byte contains all nulls, we might be at the end
-				bytesBuilder.WriteByte(currentByte)
-
-				// Reset for next byte
-				currentByte = 0
-				bitCount = 0
-			}
+	output := func(format string, args ...interface{}) {
+		if logger != nil {
+			logger.Printf(format, args...)
+		} else {
+			fmt.Printf(format, args...)
 		}
 	}
 
-	return bytesBuilder.Bytes()
-}
+	output("\n=== Advanced Statistical Analysis ===\n")
 
-// Helper function to update scan results based on finding
-func updateResults(results *ScanResults, result ScanResult) {
-	results.Results = append(results.Results, result)
-	switch result.Level {
-	case Clean:
-		results.CleanFiles++
-	case Suspicious:
-		results.Suspicious++
-	case ConfirmedC2:
-		results.ConfirmedC2++
+	// Run the new statistical analysis
+	anomalyScore, dist, err := DetectSteganoAnomaly(img)
+	if err != nil {
+		output("[-] Failed to perform statistical analysis: %v\n", err)
+		return
 	}
-}
 
-func printSummary(results *ScanResults) {
-	fmt.Printf("\n=== Final Analysis Summary ===\n")
-	fmt.Printf("Total files scanned: %d\n", results.TotalFiles)
-	fmt.Printf("Clean files: %d\n", results.CleanFiles)
-	fmt.Printf("Suspicious files: %d\n", results.Suspicious)
-	fmt.Printf("Confirmed C2 traffic: %d\n", results.ConfirmedC2)
+	// Output detailed statistics
+	output("LSB Distribution Analysis:\n")
+	output("- Overall entropy: %.4f (closer to 1.0 = more random)\n", dist.Entropy)
+	output("- Channel statistics:\n")
+	output("  - Red:   Entropy=%.4f\n", dist.ChannelStats["R"].Entropy)
+	output("  - Green: Entropy=%.4f\n", dist.ChannelStats["G"].Entropy)
+	output("  - Blue:  Entropy=%.4f\n", dist.ChannelStats["B"].Entropy)
 
-	if results.ConfirmedC2 > 0 {
-		fmt.Printf("\n[!] Files containing C2 traffic:\n")
-		for _, r := range results.Results {
-			if r.Level == ConfirmedC2 {
-				fmt.Printf("\n- %s\n", r.Filename)
-				fmt.Printf("  Commands found:\n")
-				for _, f := range r.Findings {
-					if f.Level == ConfirmedC2 && strings.Contains(f.Details, "Found shell commands:") {
-						// Extract and format the command list
-						cmds := strings.TrimPrefix(f.Details, "Found shell commands: [")
-						cmds = strings.TrimSuffix(cmds, "]")
-						cmdList := strings.Split(cmds, " ")
-						for _, cmd := range cmdList {
-							cmd = strings.Trim(cmd, "\",'`")
-							if cmd != "" {
-								fmt.Printf("    > %s\n", cmd)
-							}
-						}
-					}
-				}
-				// Show other C2 findings that aren't command matches
-				for _, f := range r.Findings {
-					if f.Level == ConfirmedC2 && !strings.Contains(f.Details, "Found shell commands:") {
-						fmt.Printf("  * %s (Confidence: %d/10)\n", f.Description, f.Confidence)
-						fmt.Printf("    Detail: %s\n", f.Details)
-					}
-				}
-			}
+	// Interpret the results
+	output("\nFinal anomaly score: %.4f ", anomalyScore)
+
+	// Only flag images with very high anomaly scores
+	if anomalyScore > 0.85 {
+		output("(HIGHLY SUSPICIOUS)\n")
+		if result != nil {
+			result.AddFinding(
+				"Highly anomalous LSB distribution",
+				9, // High confidence
+				Suspicious,
+				fmt.Sprintf("Statistical anomaly score=%.4f (>0.85 is suspicious)", anomalyScore),
+			)
+		}
+	} else if anomalyScore > 0.75 {
+		output("(SOMEWHAT SUSPICIOUS)\n")
+		if result != nil {
+			result.AddFinding(
+				"Unusual LSB distribution",
+				7, // Medium confidence
+				Suspicious,
+				fmt.Sprintf("Statistical anomaly score=%.4f (>0.75 is unusual)", anomalyScore),
+			)
+		}
+	} else {
+		output("(NORMAL RANGE)\n")
+	}
+
+	// Also check for extreme entropy values which can indicate steganography
+	if dist.Entropy > 0.99 {
+		output("[!] Perfect entropy detected (%.4f) - highly suspicious\n", dist.Entropy)
+		if result != nil {
+			result.AddFinding(
+				"Perfect LSB entropy",
+				9,
+				Suspicious,
+				fmt.Sprintf("LSB entropy=%.4f (unnaturally perfect randomness)", dist.Entropy),
+			)
+		}
+	} else if dist.Entropy < 0.3 {
+		output("[!] Extremely low entropy detected (%.4f) - suspicious\n", dist.Entropy)
+		if result != nil {
+			result.AddFinding(
+				"Abnormally low LSB entropy",
+				8,
+				Suspicious,
+				fmt.Sprintf("LSB entropy=%.4f (unnaturally low randomness)", dist.Entropy),
+			)
 		}
 	}
-
-	if results.Suspicious > 0 {
-		fmt.Printf("\n[?] Suspicious files requiring further investigation:\n")
-		for _, r := range results.Results {
-			if r.Level == Suspicious {
-				fmt.Printf("- %s\n", r.Filename)
-				// Only show high confidence findings in summary
-				for _, f := range r.Findings {
-					if f.Level == Suspicious && f.Confidence >= 7 {
-						fmt.Printf("  * %s (Confidence: %d/10)\n", f.Description, f.Confidence)
-					}
-				}
-			}
-		}
-	}
-}
-
-// IsLikelyC2Traffic analyzes text to determine if it appears to be C2 traffic
-func IsLikelyC2Traffic(text string) (bool, string) {
-	matches := commandRegex.FindAllString(text, -1)
-	if len(matches) > 0 {
-		// Deduplicate matches
-		seen := make(map[string]bool)
-		var unique []string
-		for _, match := range matches {
-			if !seen[match] {
-				seen[match] = true
-				unique = append(unique, match)
-			}
-		}
-		return true, fmt.Sprintf("Found shell commands: %v", unique)
-	}
-
-	// Additional C2 indicators
-	if strings.Contains(strings.ToLower(text), "://") &&
-		(strings.Contains(strings.ToLower(text), ".exe") ||
-			strings.Contains(strings.ToLower(text), ".dll")) {
-		return true, "Found executable download URL"
-	}
-
-	if strings.Contains(strings.ToLower(text), "reverse") &&
-		strings.Contains(strings.ToLower(text), "shell") {
-		return true, "Found reverse shell pattern"
-	}
-
-	return false, ""
 }
