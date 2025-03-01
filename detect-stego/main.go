@@ -410,7 +410,7 @@ func runJPEGAnalysis(img image.Image, filename string, logger *Logger) {
 
 	output("\n=== JPEG Analysis ===\n")
 
-	// 1. Analyze DCT coefficient histograms
+	// 1. Analyze JPEG metadata
 	jfifData, err := ExtractJPEGMetadata(filename)
 	if err != nil {
 		output("[-] Failed to extract JPEG metadata: %v\n", err)
@@ -434,10 +434,66 @@ func runJPEGAnalysis(img image.Image, filename string, logger *Logger) {
 			output("[!] Detected possible Outguess steganography\n")
 		}
 	} else {
-		output("[ ] No signs of JPEG steganography detected\n")
+		output("[ ] No obvious signs of JPEG steganography detected in file structure\n")
 	}
 
-	// 3. Other JPEG-specific checks
+	// 2.5 NEW: Specific Steghide detection
+	output("\n=== StegHide Detection ===\n")
+	isStegHide, stegStats, err := DetectStegHide(filename)
+	if err != nil {
+		output("[-] Error during StegHide detection: %v\n", err)
+	} else if isStegHide {
+		output("[!] StegHide steganography detected (confidence: %d/10)\n", stegStats.ConfidenceScore)
+		output("    - Modified coefficients: %.1f%%\n", stegStats.ModifiedCoefficients*100)
+		output("    - Even/Odd coefficient ratio: %.2f (normal ~1.0)\n", stegStats.EvenOddRatio)
+		output("    - StegHide header detected: %v\n", stegStats.PotentialHeader)
+
+		// Try to extract information about the payload
+		payloadInfo, err := ExtractPotentialStegHidePayload(filename)
+		if err == nil && len(payloadInfo) > 0 {
+			output("[+] Payload information:\n%s\n", string(payloadInfo))
+		}
+	} else {
+		if stegStats.ConfidenceScore > 0 {
+			output("[-] Some StegHide indicators found, but below detection threshold (confidence: %d/10)\n",
+				stegStats.ConfidenceScore)
+		} else {
+			output("[ ] No evidence of StegHide steganography\n")
+		}
+	}
+
+	// 3. Look for plaintext steganography
+	output("\n=== JPEG Plaintext Search ===\n")
+	plaintextFindings, err := ScanForPlaintextStego(filename)
+	if err != nil {
+		output("[-] Error scanning for plaintext: %v\n", err)
+	} else if len(plaintextFindings) > 0 {
+		output("[!] Found %d potential plaintext message(s) in unexpected locations:\n", len(plaintextFindings))
+
+		for i, text := range plaintextFindings {
+			// Add a score to each finding based on how confident we are
+			confidence := assessTextConfidence(text)
+
+			// Limit output length to avoid flooding the console
+			displayText := text
+			if len(displayText) > 100 {
+				displayText = displayText[:97] + "..."
+			}
+
+			output("    [%d] (Confidence: %d/10) %s\n", i+1, confidence, displayText)
+		}
+	} else {
+		output("[ ] No suspicious plaintext found in JPEG structure\n")
+	}
+
+	// 4. Check for polyglot files (JPEG combined with another format)
+	isPolyglot, otherFormat := ScanForPolyglotFile(filename)
+	if isPolyglot {
+		output("[!] File appears to be a polyglot - both JPEG and %s format\n", otherFormat)
+		output("    Polyglot files are often used to hide data\n")
+	}
+
+	// 5. Other JPEG-specific checks
 	output("\n=== JPEG File Structure Analysis ===\n")
 
 	// Check for appended data
@@ -454,8 +510,14 @@ func runJPEGAnalysis(img image.Image, filename string, logger *Logger) {
 					output("... (%d more bytes)\n", len(appendedData)-100)
 				}
 			} else {
+				entropy := ComputeEntropy(appendedData)
 				output("[+] Appended data is binary (%d bytes, entropy: %.2f)\n",
-					len(appendedData), ComputeEntropy(appendedData))
+					len(appendedData), entropy)
+
+				// Check for encoded text in the binary data
+				if containsEncodedBytes(appendedData) {
+					output("[!] Appended data appears to contain encoded text (possible base64/hex)\n")
+				}
 			}
 		}
 	} else {
@@ -469,6 +531,71 @@ func runJPEGAnalysis(img image.Image, filename string, logger *Logger) {
 	} else {
 		output("[ ] Quantization tables appear standard\n")
 	}
+
+	// Check comment sections
+	if len(jfifData.Comments) > 0 {
+		output("\n=== JPEG Comments Analysis ===\n")
+
+		for i, comment := range jfifData.Comments {
+			if len(comment) > 100 {
+				output("[!] Comment %d: Length=%d (suspicious if >100): %.100s...\n",
+					i+1, len(comment), comment)
+			} else {
+				output("[+] Comment %d: %s\n", i+1, comment)
+			}
+		}
+	}
+}
+
+// assessTextConfidence rates how likely a string is to be an intentional hidden message
+func assessTextConfidence(text string) int {
+	// Start with baseline score
+	score := 5
+
+	// Longer text is more likely to be meaningful
+	if len(text) > 20 {
+		score++
+	}
+
+	// Text with spaces is more likely to be natural language
+	if strings.Contains(text, " ") {
+		score++
+	}
+
+	// Text with normal punctuation is more likely to be meaningful
+	if strings.ContainsAny(text, ".,:;?!") {
+		score++
+	}
+
+	// Check for keywords that suggest a hidden message
+	if strings.Contains(strings.ToLower(text), "secret") ||
+		strings.Contains(strings.ToLower(text), "password") ||
+		strings.Contains(strings.ToLower(text), "key") ||
+		strings.Contains(strings.ToLower(text), "confidential") {
+		score += 2
+	}
+
+	// Check for high numbers of special characters/digits (suspicious)
+	specCount := 0
+	for _, c := range text {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == ' ') {
+			specCount++
+		}
+	}
+
+	if float64(specCount)/float64(len(text)) > 0.4 {
+		score -= 2
+	}
+
+	// Clamp score between 1-10
+	if score < 1 {
+		score = 1
+	}
+	if score > 10 {
+		score = 10
+	}
+
+	return score
 }
 
 // min returns the minimum of two integers
