@@ -1,0 +1,26 @@
+FROM debian:bookworm
+
+# Set non-interactive mode to avoid prompts during installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Update package list and install dependencies
+RUN apt-get update && \
+    apt-get install -y git gccgo && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Set Go alternative
+RUN update-alternatives --set go /usr/bin/go-5 || true
+
+# Set working directory
+WORKDIR /repos
+
+# Clone the repositories
+RUN git clone https://github.com/mikf/gallery-dl.git && \
+    git clone https://github.com/thvl3/SteGOC2.git
+
+# Build Go (if needed)
+RUN GOROOT_BOOTSTRAP=/usr ./make.bash || true
+
+# Keep the container running
+CMD ["tail", "-f", "/dev/null"]
+
