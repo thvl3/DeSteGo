@@ -1,0 +1,9 @@
+Potential Project Structure:
+SteGoC2
+├── detector.go         # The main detection CLI
+├── steganography.go    # LSB extraction logic
+├── go.mod              # Go module file
+├── go.sum              # (auto-generated)
+├── sample1.png         # Sample images for testing
+├── sample2.png         # ...
+└── README.md
