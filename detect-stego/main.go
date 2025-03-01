@@ -240,6 +240,19 @@ func runLSBAnalysis(img image.Image, logger *Logger) {
 
 	output("\n=== LSB Brute Force Analysis ===\n")
 
+	// Create a progress callback function
+	progressCb := func(percentComplete float64, message string) {
+		if logger != nil {
+			logger.Printf("\r[%.1f%%] %s", percentComplete, message)
+		} else {
+			fmt.Printf("\r[%.1f%%] %s", percentComplete, message)
+			// Ensure console flushes the output
+			if message == "" || message[len(message)-1] == '\n' {
+				fmt.Print("\n")
+			}
+		}
+	}
+
 	// 1. First try specific, targeted masks that are commonly used in steganography
 	commonMasks := []ChannelMask{
 		{RBits: 1, GBits: 0, BBits: 0, ABits: 0}, // R only
@@ -251,12 +264,17 @@ func runLSBAnalysis(img image.Image, logger *Logger) {
 
 	for _, mask := range commonMasks {
 		// Try both with and without length prefix
-		tryExtractChannelMask(img, mask, true, output)
-		tryExtractChannelMask(img, mask, false, output)
+		tryExtractChannelMask(img, mask, true, progressCb, output)
+		tryExtractChannelMask(img, mask, false, progressCb, output)
 	}
 
-	// 2. Then do a more comprehensive brute force if needed
-	results := BruteForceLSB(img)
+	output("\n") // Ensure we have a clean line after progress updates
+
+	// 2. Then do a more comprehensive brute force
+	output("Starting comprehensive LSB brute force scan...\n")
+	results := BruteForceLSB(img, progressCb)
+	output("\n") // Ensure clean line after progress
+
 	if len(results) > 0 {
 		output("[+] Found %d potential embedded payload(s) via LSB brute force:\n", len(results))
 		for _, r := range results {
@@ -282,16 +300,18 @@ func runLSBAnalysis(img image.Image, logger *Logger) {
 }
 
 // tryExtractChannelMask tries to extract data using a specific channel mask
-func tryExtractChannelMask(img image.Image, mask ChannelMask, useLength bool, output func(string, ...interface{})) {
+func tryExtractChannelMask(img image.Image, mask ChannelMask, useLength bool,
+	progressCb ProgressCallback, output func(string, ...interface{})) {
+
 	var data []byte
 	var err error
 
 	if useLength {
 		// Try extracting with length prefix
-		data, err = ExtractData(img, mask, LSBFirst)
+		data, err = ExtractData(img, mask, LSBFirst, progressCb)
 	} else {
 		// Try extracting without length prefix
-		data = ExtractBitsDirectly(img, mask)
+		data = ExtractLSBNoLength(img, mask, LSBFirst, progressCb)
 		if len(data) == 0 {
 			err = fmt.Errorf("no data extracted")
 		}
@@ -303,7 +323,7 @@ func tryExtractChannelMask(img image.Image, mask ChannelMask, useLength bool, ou
 			if useLength {
 				extractionType = "length-based"
 			}
-			output("[+] Found hidden ASCII text using %s extraction (R:%d G:%d B:%d A:%d):\n%q\n",
+			output("\n[+] Found hidden ASCII text using %s extraction (R:%d G:%d B:%d A:%d):\n%q\n",
 				extractionType,
 				mask.RBits, mask.GBits, mask.BBits, mask.ABits,
 				string(data))

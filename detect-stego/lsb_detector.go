@@ -216,7 +216,7 @@ func TryExtractJSLSB(img image.Image) (string, error) {
 	mask := GetLSBMask()
 
 	// For the JS implementation, we know it's using LSB first order
-	data, err := ExtractData(img, mask, LSBFirst)
+	data, err := ExtractData(img, mask, LSBFirst, nil)
 	if err != nil {
 		return "", err
 	}
