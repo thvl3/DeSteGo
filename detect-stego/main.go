@@ -6,10 +6,18 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
-// main orchestrates everything from a command-line perspective.
-// Usage: go run main.go -file <pngfile> OR -dir <directory-of-pngs>
+// Worker pool size for scanning files concurrently
+const workerCount = 4
+
+// main orchestrates everything from the command line.
+//
+// Usage examples:
+//
+//	go run testmain.go -dir ./images
+//	go run testmain.go -file sample.png
 func main() {
 	dirPtr := flag.String("dir", "", "Directory of PNG files to scan")
 	filePtr := flag.String("file", "", "Single PNG file to scan")
@@ -17,35 +25,62 @@ func main() {
 
 	if *dirPtr == "" && *filePtr == "" {
 		fmt.Println("Usage:")
-		fmt.Println("  stegodetect -dir <directory>")
-		fmt.Println("  stegodetect -file <pngfile>")
+		fmt.Println("  testmain -dir <directory>")
+		fmt.Println("  testmain -file <pngfile>")
 		os.Exit(1)
 	}
 
 	if *dirPtr != "" {
 		scanDirectory(*dirPtr)
 	} else {
+		// Single-file scan
 		scanFile(*filePtr)
 	}
 }
 
-// scanDirectory recursively scans all .png files in dirPath.
+// scanDirectory enumerates PNG files and processes them in parallel.
 func scanDirectory(dirPath string) {
+	// Gather .png files
+	var files []string
 	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 		if !info.IsDir() && filepath.Ext(info.Name()) == ".png" {
-			scanFile(path)
+			files = append(files, path)
 		}
 		return nil
 	})
 	if err != nil {
 		log.Printf("[!] Error walking directory %s: %v\n", dirPath, err)
+		return
 	}
+
+	// Set up a worker pool
+	fileChan := make(chan string)
+	var wg sync.WaitGroup
+
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for f := range fileChan {
+				scanFile(f)
+			}
+		}()
+	}
+
+	// Feed the files to the workers
+	for _, f := range files {
+		fileChan <- f
+	}
+	close(fileChan)
+
+	// Wait for all workers to finish
+	wg.Wait()
 }
 
-// scanFile applies our detection methods to a single PNG file.
+// scanFile performs all detection steps on a single file.
 func scanFile(filename string) {
 	fmt.Printf("\n--- Scanning %s ---\n", filename)
 	img, err := LoadPNG(filename)
@@ -54,34 +89,45 @@ func scanFile(filename string) {
 		return
 	}
 
-	// 1) Run a Chi-Square analysis on the red-channel LSB distribution
+	//
+	// 1) Run a Chi-Square analysis on R, G, B channels separately.
+	//    We assume you've modified ChiSquareLSB(img, channel rune) to handle 'R','G','B'.
+	//
 	chiR := ChiSquareLSB(img, 'R')
 	if IsSuspiciousChiSquare(chiR) {
 		fmt.Printf("[!] Chi-square result (R) = %.4f => Suspiciously uniform distribution!\n", chiR)
 	} else {
 		fmt.Printf("[ ] Chi-square result (R) = %.4f => Not strongly suspicious.\n", chiR)
 	}
-	// 1b) Run a Chi-Square analysis on the green-channel LSB distribution
+
 	chiG := ChiSquareLSB(img, 'G')
 	if IsSuspiciousChiSquare(chiG) {
 		fmt.Printf("[!] Chi-square result (G) = %.4f => Suspiciously uniform distribution!\n", chiG)
 	} else {
 		fmt.Printf("[ ] Chi-square result (G) = %.4f => Not strongly suspicious.\n", chiG)
 	}
-	// 1c) Run a Chi-Square analysis on the blue-channel LSB distribution
+
 	chiB := ChiSquareLSB(img, 'B')
 	if IsSuspiciousChiSquare(chiB) {
 		fmt.Printf("[!] Chi-square result (B) = %.4f => Suspiciously uniform distribution!\n", chiB)
 	} else {
 		fmt.Printf("[ ] Chi-square result (B) = %.4f => Not strongly suspicious.\n", chiB)
 	}
+
+	//
 	// 2) Brute Force LSB extraction with multiple channel/bit combos
+	//    (assuming you have a function BruteForceLSB(img) that returns
+	//    a slice of { Mask, Data } or similar).
+	//
 	results := BruteForceLSB(img)
 	if len(results) == 0 {
 		fmt.Println("[ ] No LSB-embedded data found with the tested channel masks.")
 		return
 	}
 
+	//
+	// 3) Print out extracted data or note if it's likely encrypted.
+	//
 	fmt.Printf("[+] Found %d potential embedded payload(s) via LSB brute force:\n", len(results))
 	for _, r := range results {
 		if IsASCIIPrintable(r.Data) {
