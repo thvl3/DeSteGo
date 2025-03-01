@@ -19,7 +19,42 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
+
+// Color constants
+const (
+	colorReset  = "\033[0m"
+	colorRed    = "\033[31m"
+	colorGreen  = "\033[32m"
+	colorYellow = "\033[33m"
+	colorBlue   = "\033[34m"
+	colorPurple = "\033[35m"
+	colorCyan   = "\033[36m"
+	colorWhite  = "\033[37m"
+	colorBold   = "\033[1m"
+)
+
+// Colored output helpers
+func printInfo(format string, args ...interface{}) {
+	fmt.Printf(colorBlue+"[*] "+format+colorReset, args...)
+}
+
+func printSuccess(format string, args ...interface{}) {
+	fmt.Printf(colorGreen+"[+] "+format+colorReset, args...)
+}
+
+func printWarning(format string, args ...interface{}) {
+	fmt.Printf(colorYellow+"[!] "+format+colorReset, args...)
+}
+
+func printError(format string, args ...interface{}) {
+	fmt.Printf(colorRed+"[-] "+format+colorReset, args...)
+}
+
+func printAlert(format string, args ...interface{}) {
+	fmt.Printf(colorRed+colorBold+"[!!!] "+format+colorReset, args...)
+}
 
 // moveFiles moves all PNG and JPG files from subdirectories to the target directory
 func moveFiles(rootDir string) error {
@@ -66,39 +101,135 @@ func removeEmptyDirsRecursively(rootDir string) error {
 	return nil
 }
 
-func scrape() {
-	// Check for required arguments
-	if len(os.Args) < 3 {
-		fmt.Println("Usage: go-run <url> <download_directory>")
-		os.Exit(1)
+// GalleryDownload uses gallery-dl to download images from a URL
+func GalleryDownload(url string, targetDir string) error {
+	// Create target directory if it doesn't exist
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("failed to create target directory: %v", err)
 	}
 
-	url := os.Args[1]
-	downloadDir := os.Args[2]
-
 	// Run gallery-dl command
-	fmt.Println("Running gallery-dl...")
-	cmd := exec.Command("./gallery-dl.bin", url, "-d", downloadDir)
+	printInfo("Running gallery-dl for URL: %s\n", url)
+	cmd := exec.Command("./gallery-dl.bin", url, "-d", targetDir)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
-		log.Fatalf("Error running gallery-dl: %v", err)
+		return fmt.Errorf("gallery-dl failed: %v", err)
 	}
 
-	// Move files
-	fmt.Println("Moving image files...")
-	if err := moveFiles(downloadDir); err != nil {
-		log.Fatalf("Error moving files: %v", err)
+	// Move all images to the root of targetDir
+	if err := moveFiles(targetDir); err != nil {
+		return fmt.Errorf("failed to organize files: %v", err)
 	}
 
-	// Remove empty directories recursively
-	fmt.Println("Cleaning up empty directories...")
-	if err := removeEmptyDirsRecursively(downloadDir); err != nil {
-		log.Fatalf("Error removing empty directories: %v", err)
+	// Clean up empty directories
+	if err := removeEmptyDirsRecursively(targetDir); err != nil {
+		return fmt.Errorf("failed to clean up directories: %v", err)
 	}
 
-	fmt.Println("Process completed successfully!")
+	printSuccess("Gallery download completed successfully\n")
+	return nil
+}
+
+func main() {
+	// Add new flags for URL processing
+	dirPtr := flag.String("dir", "", "Directory of PNG files to scan")
+	filePtr := flag.String("file", "", "Single PNG file to scan")
+	urlFilePtr := flag.String("urlfile", "", "File containing gallery URLs to download and scan")
+	urlPtr := flag.String("url", "", "Single gallery URL to download and scan")
+	outputDirPtr := flag.String("outdir", "images", "Directory to store downloaded images")
+	sequentialPtr := flag.Bool("seq", true, "Use sequential processing (default: true)")
+	flag.Parse()
+
+	// Create output directory if it doesn't exist
+	if (*urlFilePtr != "" || *urlPtr != "") && *outputDirPtr != "" {
+		if err := os.MkdirAll(*outputDirPtr, 0755); err != nil {
+			log.Fatalf("Failed to create output directory: %v", err)
+		}
+	}
+
+	// Handle URL file input
+	if *urlFilePtr != "" {
+		// Read URLs from file
+		content, err := os.ReadFile(*urlFilePtr)
+		if err != nil {
+			log.Fatalf("Failed to read URL file: %v", err)
+		}
+
+		// Split URLs and filter empty lines
+		urls := strings.Split(string(content), "\n")
+		var validURLs []string
+		for _, url := range urls {
+			if url = strings.TrimSpace(url); url != "" {
+				validURLs = append(validURLs, url)
+			}
+		}
+
+		printInfo("Processing %d gallery URLs...\n", len(validURLs))
+
+		for _, url := range validURLs {
+			if err := GalleryDownload(url, *outputDirPtr); err != nil {
+				printError("Failed to process gallery %s: %v\n", url, err)
+			}
+		}
+
+		// Force scan of the output directory
+		*dirPtr = *outputDirPtr
+	}
+
+	// Handle single URL input
+	if *urlPtr != "" {
+		printInfo("Processing gallery URL: %s\n", *urlPtr)
+
+		if err := GalleryDownload(*urlPtr, *outputDirPtr); err != nil {
+			printError("Failed to process gallery: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Force scan of the output directory
+		*dirPtr = *outputDirPtr
+	}
+
+	// Proceed with normal scanning
+	if *dirPtr == "" && *filePtr == "" && *urlFilePtr == "" && *urlPtr == "" {
+		fmt.Println("Usage:")
+		fmt.Println("  detect-stego -dir <directory> [-seq=false]")
+		fmt.Println("  detect-stego -file <imagefile>")
+		fmt.Println("  detect-stego -urlfile <file-with-urls>")
+		fmt.Println("  detect-stego -url <single-url>")
+		fmt.Println("  detect-stego -outdir <output-directory> (default: images)")
+		os.Exit(1)
+	}
+
+	var results ScanResults
+
+	// Run appropriate scan mode
+	if *dirPtr != "" {
+		// Ensure we wait a moment for files to be written
+		time.Sleep(time.Second)
+
+		if *sequentialPtr {
+			results = scanDirectorySequential(*dirPtr)
+		} else {
+			results = scanDirectoryConcurrent(*dirPtr)
+		}
+	} else if *filePtr != "" {
+		result := scanFile(*filePtr)
+		results.Results = append(results.Results, result)
+		results.TotalFiles = 1
+		switch result.Level {
+		case Clean:
+			results.CleanFiles++
+		case Suspicious:
+			results.Suspicious++
+		case ConfirmedC2:
+			results.ConfirmedC2++
+		}
+	}
+
+	// Print final summary
+	printSummary(&results)
 }
 
 // Usage: GrabFromURL(url)
@@ -120,25 +251,94 @@ func GenerateFilename(dir string) (string, error) {
 	return fullpath, nil
 }
 
-// main grab function, meant to use with direct image urls
-func GrabFromURL(url string) {
-	// make an http request to given url
-	response, err := http.Get(url)
+// GrabFromURL modified to handle various response types
+func GrabFromURL(url string, targetDir string) error {
+	// Create an HTTP client with redirects enabled
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return nil
+		},
+	}
 
+	// Make HTTP request
+	response, err := client.Get(url)
 	if err != nil {
-		fmt.Println("Error: HTTP request unsuccessful (basic_grab.go)")
+		return fmt.Errorf("HTTP request failed: %v", err)
 	}
 	defer response.Body.Close()
 
-	// use a read function to read the bytes from the body slice into the pic_data variable
-	pic_data, err := io.ReadAll(response.Body)
-	if err != nil {
-		fmt.Println("Error: Could not read image data from HTTP body (basic_grab.go)")
+	// Check content type
+	contentType := response.Header.Get("Content-Type")
+	if !strings.Contains(contentType, "image/") {
+		return fmt.Errorf("not an image: %s", contentType)
 	}
 
-	// generate random name and store the file in the test directory
-	output_file, _ := GenerateFilename("../test/")
-	os.WriteFile(output_file, pic_data, 0666)
+	// Generate random filename with correct path joining
+	buffer := make([]byte, 16)
+	if _, err := rand.Read(buffer); err != nil {
+		return fmt.Errorf("failed to generate random filename: %v", err)
+	}
+
+	// Determine file extension based on content type
+	ext := ".jpg"
+	if strings.Contains(contentType, "png") {
+		ext = ".png"
+	}
+
+	filename := filepath.Join(targetDir, fmt.Sprintf("%x%s", buffer, ext))
+
+	// Create the file
+	out, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("failed to create file %s: %v", filename, err)
+	}
+	defer out.Close()
+
+	// Copy the data to the file
+	_, err = io.Copy(out, response.Body)
+	if err != nil {
+		os.Remove(filename) // Clean up on error
+		return fmt.Errorf("failed to write image data: %v", err)
+	}
+
+	fmt.Printf("Successfully downloaded: %s -> %s\n", url, filepath.Base(filename))
+	return nil
+}
+
+// main grab function, meant to use with direct image urls
+func GrabFromURLList(urls []string, targetDir string) error {
+	// Create target directory if it doesn't exist
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("failed to create target directory: %v", err)
+	}
+
+	// Filter out empty URLs
+	var validURLs []string
+	for _, url := range urls {
+		if url = strings.TrimSpace(url); url != "" {
+			validURLs = append(validURLs, url)
+		}
+	}
+
+	if len(validURLs) == 0 {
+		return fmt.Errorf("no valid URLs found")
+	}
+
+	// Process URLs one at a time to avoid rate limiting
+	var errors []error
+	for _, url := range validURLs {
+		if err := GrabFromURL(url, targetDir); err != nil {
+			errors = append(errors, fmt.Errorf("failed to download %s: %v", url, err))
+		}
+		// Add a small delay between requests
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("encountered %d errors during download: %v", len(errors), errors)
+	}
+
+	return nil
 }
 
 // Worker pool size for scanning files concurrently
@@ -197,167 +397,6 @@ func (l *Logger) FlushTo(w io.Writer) {
 	l.buf.Reset()
 }
 
-// GrabFromURLList downloads images from a list of URLs
-func GrabFromURLList(urls []string, targetDir string) error {
-	// Create target directory if it doesn't exist
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		return fmt.Errorf("failed to create target directory: %v", err)
-	}
-
-	// Create a wait group to handle concurrent downloads
-	var wg sync.WaitGroup
-	errors := make(chan error, len(urls))
-
-	// Create a semaphore to limit concurrent downloads
-	sem := make(chan struct{}, 5) // Limit to 5 concurrent downloads
-
-	for _, url := range urls {
-		wg.Add(1)
-		go func(url string) {
-			defer wg.Done()
-
-			// Acquire semaphore
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			// Make HTTP request
-			response, err := http.Get(url)
-			if err != nil {
-				errors <- fmt.Errorf("failed to download %s: %v", url, err)
-				return
-			}
-			defer response.Body.Close()
-
-			// Generate random filename
-			filename, err := GenerateFilename(targetDir)
-			if err != nil {
-				errors <- fmt.Errorf("failed to generate filename for %s: %v", url, err)
-				return
-			}
-
-			// Create the file
-			out, err := os.Create(filename)
-			if err != nil {
-				errors <- fmt.Errorf("failed to create file %s: %v", filename, err)
-				return
-			}
-			defer out.Close()
-
-			// Copy the data to the file
-			_, err = io.Copy(out, response.Body)
-			if err != nil {
-				errors <- fmt.Errorf("failed to write to file %s: %v", filename, err)
-				return
-			}
-
-			fmt.Printf("Successfully downloaded: %s -> %s\n", url, filename)
-		}(url)
-	}
-
-	// Wait for all downloads to complete
-	wg.Wait()
-	close(errors)
-
-	// Collect any errors
-	var errorList []error
-	for err := range errors {
-		errorList = append(errorList, err)
-	}
-
-	if len(errorList) > 0 {
-		return fmt.Errorf("encountered %d errors during download: %v", len(errorList), errorList)
-	}
-
-	return nil
-}
-
-func main() {
-	// Add new flags for URL processing
-	dirPtr := flag.String("dir", "", "Directory of PNG files to scan")
-	filePtr := flag.String("file", "", "Single PNG file to scan")
-	urlFilePtr := flag.String("urlfile", "", "File containing URLs to download and scan")
-	urlPtr := flag.String("url", "", "Single URL to download and scan")
-	outputDirPtr := flag.String("outdir", "images", "Directory to store downloaded images")
-	sequentialPtr := flag.Bool("seq", true, "Use sequential processing (default: true)")
-	flag.Parse()
-
-	// Create output directory if it doesn't exist
-	if *urlFilePtr != "" || *urlPtr != "" {
-		if err := os.MkdirAll(*outputDirPtr, 0755); err != nil {
-			log.Fatalf("Failed to create output directory: %v", err)
-		}
-	}
-
-	// Handle URL file input
-	if *urlFilePtr != "" {
-		// Read URLs from file
-		content, err := os.ReadFile(*urlFilePtr)
-		if err != nil {
-			log.Fatalf("Failed to read URL file: %v", err)
-		}
-
-		urls := strings.Split(strings.TrimSpace(string(content)), "\n")
-		fmt.Printf("Downloading %d images from URLs...\n", len(urls))
-
-		if err := GrabFromURLList(urls, *outputDirPtr); err != nil {
-			log.Printf("Warning: Some downloads failed: %v", err)
-		}
-
-		// Set directory pointer to output directory for scanning
-		dirPtr = outputDirPtr
-	}
-
-	// Handle single URL input
-	if *urlPtr != "" {
-		urls := []string{*urlPtr}
-		fmt.Printf("Downloading image from URL: %s\n", *urlPtr)
-
-		if err := GrabFromURLList(urls, *outputDirPtr); err != nil {
-			log.Fatalf("Failed to download image: %v", err)
-		}
-
-		// Set directory pointer to output directory for scanning
-		dirPtr = outputDirPtr
-	}
-
-	// Proceed with normal scanning
-	if *dirPtr == "" && *filePtr == "" && *urlFilePtr == "" && *urlPtr == "" {
-		fmt.Println("Usage:")
-		fmt.Println("  detect-stego -dir <directory> [-seq=false]")
-		fmt.Println("  detect-stego -file <imagefile>")
-		fmt.Println("  detect-stego -urlfile <file-with-urls>")
-		fmt.Println("  detect-stego -url <single-url>")
-		fmt.Println("  detect-stego -outdir <output-directory> (default: images)")
-		os.Exit(1)
-	}
-
-	var results ScanResults
-
-	// Run appropriate scan mode
-	if *dirPtr != "" {
-		if *sequentialPtr {
-			results = scanDirectorySequential(*dirPtr)
-		} else {
-			results = scanDirectoryConcurrent(*dirPtr)
-		}
-	} else if *filePtr != "" {
-		result := scanFile(*filePtr)
-		results.Results = append(results.Results, result)
-		results.TotalFiles = 1
-		switch result.Level {
-		case Clean:
-			results.CleanFiles++
-		case Suspicious:
-			results.Suspicious++
-		case ConfirmedC2:
-			results.ConfirmedC2++
-		}
-	}
-
-	// Print final summary
-	printSummary(&results)
-}
-
 func gatherImageFiles(dirPath string) []string {
 	var files []string
 	filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
@@ -407,8 +446,6 @@ func scanDirectorySequential(dirPath string) ScanResults {
 		updateResults(&results, result)
 	}
 
-	// Print final summary after all detailed output
-	printSummary(&results)
 	return results
 }
 
@@ -470,8 +507,6 @@ func scanDirectoryConcurrent(dirPath string) ScanResults {
 	wg.Wait()
 	close(resultChan)
 
-	// Print final summary after all detailed output
-	printSummary(&results)
 	return results
 }
 
@@ -549,11 +584,11 @@ func runChiSquareAnalysis(img image.Image, logger *Logger, result *ScanResult) {
 	// Very low or very high values can both indicate steganography
 	interpretChiSquare := func(chi float64, channel byte) {
 		if chi < 0.5 {
-			output("[!] Chi-square result (%c) = %.4f => Suspiciously uniform (likely steganography)\n", channel, chi)
+			printWarning("Chi-square result (%c) = %.4f => Suspiciously uniform (likely steganography)\n", channel, chi)
 		} else if chi > 10.0 {
-			output("[!] Chi-square result (%c) = %.4f => Suspiciously non-uniform (possible structured steganography)\n", channel, chi)
+			printWarning("Chi-square result (%c) = %.4f => Suspiciously non-uniform (possible structured steganography)\n", channel, chi)
 		} else {
-			output("[ ] Chi-square result (%c) = %.4f => Within normal range\n", channel, chi)
+			printSuccess("Chi-square result (%c) = %.4f => Within normal range\n", channel, chi)
 		}
 	}
 
@@ -1038,14 +1073,17 @@ func updateResults(results *ScanResults, result ScanResult) {
 }
 
 func printSummary(results *ScanResults) {
-	fmt.Printf("\n=== Final Analysis Summary ===\n")
+	fmt.Printf("\n" + colorBold + "=== Final Analysis Summary ===" + colorReset + "\n")
 	fmt.Printf("Total files scanned: %d\n", results.TotalFiles)
-	fmt.Printf("Clean files: %d\n", results.CleanFiles)
-	fmt.Printf("Suspicious files: %d\n", results.Suspicious)
-	fmt.Printf("Confirmed C2 traffic: %d\n", results.ConfirmedC2)
+	fmt.Printf("%sClean files: %d%s\n", colorGreen, results.CleanFiles, colorReset)
+
+	if results.Suspicious > 0 {
+		fmt.Printf("%sSuspicious files: %d%s\n", colorYellow, results.Suspicious, colorReset)
+	}
 
 	if results.ConfirmedC2 > 0 {
-		fmt.Printf("\n[!] Files containing C2 traffic:\n")
+		fmt.Printf("%sConfirmed C2 traffic: %d%s\n", colorRed, results.ConfirmedC2, colorReset)
+		printAlert("Files containing C2 traffic:\n")
 		for _, r := range results.Results {
 			if r.Level == ConfirmedC2 {
 				fmt.Printf("\n- %s\n", r.Filename)
@@ -1076,7 +1114,7 @@ func printSummary(results *ScanResults) {
 	}
 
 	if results.Suspicious > 0 {
-		fmt.Printf("\n[?] Suspicious files requiring further investigation:\n")
+		printWarning("\nSuspicious files requiring further investigation:\n")
 		for _, r := range results.Results {
 			if r.Level == Suspicious {
 				fmt.Printf("- %s\n", r.Filename)
