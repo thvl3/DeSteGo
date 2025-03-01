@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"image"
 	"image/png"
 	"io"
@@ -59,4 +60,59 @@ func ComputeEntropy(data []byte) float64 {
 		}
 	}
 	return entropy
+}
+
+// IsTerminal attempts to determine if we're running in an interactive terminal
+// This is useful for deciding whether to show live progress updates
+func IsTerminal() bool {
+	// This is a simplified check - a more robust implementation would use
+	// a library like github.com/mattn/go-isatty to check properly
+	fileInfo, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return (fileInfo.Mode() & os.ModeCharDevice) != 0
+}
+
+// IsSuspiciousLSBData checks data that was extracted to see if it might be valid steganographic content
+func IsSuspiciousLSBData(data []byte) bool {
+	// Too small to be interesting
+	if len(data) < 5 {
+		return false
+	}
+
+	// Check if it looks like ASCII text
+	if IsASCIIPrintable(data) {
+		return true
+	}
+
+	// Check entropy - encrypted/compressed data typically has high entropy
+	entropy := ComputeEntropy(data)
+
+	// High entropy suggests encrypted/compressed data
+	if entropy > 7.5 {
+		return true
+	}
+
+	// Check for some common file signatures at the start
+	fileSignatures := map[string][]byte{
+		"PNG": {0x89, 0x50, 0x4E, 0x47},
+		"JPG": {0xFF, 0xD8, 0xFF},
+		"GIF": {0x47, 0x49, 0x46, 0x38},
+		"BMP": {0x42, 0x4D},
+		"PDF": {0x25, 0x50, 0x44, 0x46},
+		"ZIP": {0x50, 0x4B, 0x03, 0x04},
+		"RAR": {0x52, 0x61, 0x72, 0x21},
+		"7Z":  {0x37, 0x7A, 0xBC, 0xAF},
+		"EXE": {0x4D, 0x5A},
+		"ELF": {0x7F, 0x45, 0x4C, 0x46},
+	}
+
+	for _, signature := range fileSignatures {
+		if len(data) >= len(signature) && bytes.Equal(data[:len(signature)], signature) {
+			return true
+		}
+	}
+
+	return false
 }
