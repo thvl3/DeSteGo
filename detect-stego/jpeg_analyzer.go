@@ -2,12 +2,13 @@ package main
 
 import (
 	"bufio"
-	//"bytes"
+	"bytes"
 	"fmt"
-	//"image"
-	//"image/jpeg"
 	"io"
+	"math"
 	"os"
+	"regexp"
+	"strings"
 )
 
 // JPEG markers
@@ -283,13 +284,21 @@ func DetectJPEGSteganography(metadata *JPEGMetadata) bool {
 			if float64(binaryCount)/float64(len(comment)) > 0.1 {
 				return true
 			}
+
+			// Check for encoded text in comments (base64, hex, etc.)
+			if containsEncodedText(comment) {
+				return true
+			}
 		}
+	}
+
+	// Check for abnormal marker sequences (unusual order or repetition)
+	if hasAbnormalMarkerSequence(metadata.MarkerSequence) {
+		return true
 	}
 
 	// Analyze quantization tables for signs of manipulation
 	for _, table := range metadata.QuantizationTables {
-		// Check if the table has been manipulated (specific checks would depend on knowledge
-		// of standard quantization tables and how stego tools modify them)
 		if hasModifiedQuantizationValues(table) {
 			return true
 		}
@@ -298,23 +307,104 @@ func DetectJPEGSteganography(metadata *JPEGMetadata) bool {
 	return false
 }
 
-// hasModifiedQuantizationValues checks if a quantization table has been manipulated
-// This is a simplified example and would need to be enhanced with actual knowledge of
-// how specific steganography tools modify quantization tables
-func hasModifiedQuantizationValues(table []byte) bool {
-	// This is a simplified check
-	// In real implementation, you'd compare against standard tables or check for patterns
+// containsEncodedText checks if the string might contain encoded data
+func containsEncodedText(text string) bool {
+	// Check for Base64 pattern (at least 20 chars, mostly A-Za-z0-9+/=)
+	if len(text) > 20 {
+		base64Pattern := regexp.MustCompile(`^[A-Za-z0-9+/=]{20,}$`)
+		if base64Pattern.MatchString(text) {
+			return true
+		}
 
-	// Check for unusual patterns in the table
-	zeroCount := 0
-	for _, val := range table {
-		if val == 0 {
-			zeroCount++
+		// Check for long hex string
+		hexPattern := regexp.MustCompile(`^[A-Fa-f0-9]{20,}$`)
+		if hexPattern.MatchString(text) {
+			return true
+		}
+
+		// Check for high entropy in the text
+		if textEntropy(text) > 4.5 {
+			return true
 		}
 	}
 
-	// If more than 10% of values are zero, it might indicate manipulation
-	if float64(zeroCount)/float64(len(table)) > 0.1 {
+	return false
+}
+
+// textEntropy calculates the Shannon entropy of a text string
+func textEntropy(text string) float64 {
+	if len(text) == 0 {
+		return 0
+	}
+
+	// Count character frequencies
+	freqs := make(map[rune]int)
+	for _, char := range text {
+		freqs[char]++
+	}
+
+	// Calculate entropy
+	entropy := 0.0
+	textLen := float64(len(text))
+	for _, count := range freqs {
+		p := float64(count) / textLen
+		entropy -= p * logBase2(p)
+	}
+
+	return entropy
+}
+
+// logBase2 calculates log base 2 of a value
+func logBase2(x float64) float64 {
+	return math.Log(x) / math.Log(2)
+}
+
+// hasAbnormalMarkerSequence checks for unusual marker sequences
+func hasAbnormalMarkerSequence(markers []byte) bool {
+	// Check for marker sequences that shouldn't occur in standard JPEGs
+	// This is a simplified check - would need more complex analysis in production
+
+	for i := 0; i < len(markers)-3; i += 2 {
+		// Check for repeated markers in sequence
+		if i > 0 && markers[i] == 0xFF && markers[i+1] == markers[i-1] &&
+			markers[i+1] != 0x00 && markers[i-1] != 0x00 {
+			return true
+		}
+	}
+
+	return false
+}
+
+// hasModifiedQuantizationValues checks if a quantization table has been manipulated
+func hasModifiedQuantizationValues(table []byte) bool {
+	// Improved version with better heuristics
+
+	// Check for unusual patterns in the table
+	zeroCount := 0
+	oneCount := 0
+	evenOddDiffs := 0 // Count differences between adjacent values
+
+	for i, val := range table {
+		if val == 0 {
+			zeroCount++
+		}
+		if val == 1 {
+			oneCount++
+		}
+
+		// Compare with adjacent values
+		if i > 0 && (val%2) != (table[i-1]%2) {
+			evenOddDiffs++
+		}
+	}
+
+	// If more than 10% of values are zero or 1, might indicate manipulation
+	if float64(zeroCount)/float64(len(table)) > 0.1 || float64(oneCount)/float64(len(table)) > 0.15 {
+		return true
+	}
+
+	// If there's a highly regular pattern of even/odd values
+	if float64(evenOddDiffs)/float64(len(table)-1) > 0.8 {
 		return true
 	}
 
@@ -414,13 +504,419 @@ func ExtractAppendedData(filename string) ([]byte, error) {
 	for i := len(data) - 2; i >= 0; i-- {
 		if data[i] == 0xFF && data[i+1] == 0xD9 {
 			if i+2 < len(data) {
-				return data[i+2:], nil
+				appendedData := data[i+2:]
+
+				// Try to detect if the appended data contains plaintext
+				if IsASCIIPrintable(appendedData) {
+					return appendedData, nil
+				}
+
+				// Check if it's an encoded message (base64, hex, etc)
+				if containsEncodedBytes(appendedData) {
+					return appendedData, nil
+				}
+
+				return appendedData, nil
 			}
 			break
 		}
 	}
 
 	return nil, fmt.Errorf("no appended data found")
+}
+
+// containsEncodedBytes checks if byte array might contain encoded data
+func containsEncodedBytes(data []byte) bool {
+	// Convert to string for regex checks
+	str := string(data)
+
+	// Check for Base64 pattern (at least 20 chars, mostly A-Za-z0-9+/=)
+	base64Pattern := regexp.MustCompile(`[A-Za-z0-9+/=]{20,}`)
+	if base64Pattern.MatchString(str) {
+		return true
+	}
+
+	// Check for hex encoded data
+	hexPattern := regexp.MustCompile(`[A-Fa-f0-9]{20,}`)
+	if hexPattern.MatchString(str) {
+		return true
+	}
+
+	// Check entropy - high entropy suggests encoded or encrypted data
+	if ComputeEntropy(data) > 3.5 {
+		return true
+	}
+
+	return false
+}
+
+// ScanForPlaintextStego searches for plaintext hidden in various JPEG segments
+func ScanForPlaintextStego(filename string) ([]string, error) {
+	var findings []string
+
+	// Open the JPEG file
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	// Read the entire file to search through
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, err
+	}
+
+	// Gather positions of all known segments to avoid false positives
+	knownSegments := identifyKnownSegments(data)
+
+	// Check for ASCII text throughout the file
+	// Use sliding window approach to detect potential plaintext
+	for i := 0; i < len(data)-20; i++ {
+		// Skip if we're in a known segment that typically contains structured data
+		if isInKnownSegment(i, knownSegments) {
+			continue
+		}
+
+		// Check 40-byte windows
+		end := min(i+40, len(data))
+		window := data[i:end]
+
+		// If window has high percentage of printable ASCII
+		printableCount := 0
+		for _, b := range window {
+			if (b >= 32 && b <= 126) || b == '\n' || b == '\r' || b == '\t' {
+				printableCount++
+			}
+		}
+
+		// If more than 95% is printable (increased from 90%)
+		if float64(printableCount)/float64(len(window)) > 0.95 {
+			// Filter out false positives by checking for common JPEG patterns
+			text := string(window)
+
+			if !isCommonJPEGPattern(text) && isLikelyPlaintext(text) {
+				// Clean up the text by removing non-printable characters
+				cleanText := cleanupText(text)
+
+				// Only include if it looks meaningful (more strict check)
+				if len(cleanText) >= 10 && containsMeaningfulText(cleanText) {
+					findings = append(findings, cleanText)
+					// Skip ahead to avoid duplicate detections
+					i += len(window)
+				}
+			}
+		}
+	}
+
+	// Check for text/messages in EXIF data - improved version
+	exifText, err := extractImprovedEXIFText(filename)
+	if err == nil && len(exifText) > 0 {
+		findings = append(findings, exifText...)
+	}
+
+	// Filter out any remaining false positives
+	return filterFalsePositives(findings), nil
+}
+
+// identifyKnownSegments identifies positions of standard JPEG segments
+func identifyKnownSegments(data []byte) []segment {
+	var segments []segment
+
+	for i := 0; i < len(data)-2; i++ {
+		// Look for marker prefix
+		if data[i] == 0xFF && data[i+1] != 0x00 && data[i+1] != 0xFF {
+			markerType := data[i+1]
+
+			// Skip markers that don't have a length field
+			if markerType == markerSOI || markerType == markerEOI {
+				continue
+			}
+
+			// Get segment length for markers that have length fields
+			if i+3 < len(data) {
+				length := int(data[i+2])<<8 | int(data[i+3])
+				if length >= 2 && i+length < len(data) {
+					segments = append(segments, segment{
+						start:  i,
+						end:    i + length + 2,
+						marker: markerType,
+					})
+					i = i + length + 1 // Skip to end of segment
+				}
+			}
+		}
+	}
+
+	return segments
+}
+
+// segment represents a JPEG segment
+type segment struct {
+	start  int
+	end    int
+	marker byte
+}
+
+// isInKnownSegment checks if a position is part of a known JPEG segment
+func isInKnownSegment(pos int, segments []segment) bool {
+	for _, seg := range segments {
+		if pos >= seg.start && pos < seg.end {
+			// Skip checking text in certain segments that can contain
+			// legitimate text like comments or EXIF
+			if seg.marker == markerCOM || seg.marker == markerAPP1 {
+				return false // Allow text detection in these segments
+			}
+			return true // In other segments, skip text detection
+		}
+	}
+	return false
+}
+
+// isCommonJPEGPattern identifies common strings in JPEG files that aren't steganography
+func isCommonJPEGPattern(text string) bool {
+	commonPatterns := []string{
+		// Huffman tables often contain these patterns
+		"%&'()*456789:CDEFGHIJ",
+		"&'()*56789:CDEFGHIJSTUVWXYZcdefghij",
+		"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklm",
+
+		// JFIF/EXIF standard strings
+		"JFIF", "Exif", "http://", "Adobe", "ICC_PROFILE",
+
+		// Common EXIF tags as strings
+		"Nikon", "Canon", "OLYMPUS", "PENTAX", "SONY",
+	}
+
+	for _, pattern := range commonPatterns {
+		if strings.Contains(text, pattern) {
+			return true
+		}
+	}
+
+	// Also check for repetitive sequences that appear in huffman tables
+	if containsRepetitivePattern(text) {
+		return true
+	}
+
+	return false
+}
+
+// containsRepetitivePattern checks if the text has repetitive sequences
+// like "2222222222" which are common in JPEG encoding tables
+func containsRepetitivePattern(text string) bool {
+	// Check for sequences of the same character repeating more than 5 times
+	for i := 0; i < len(text)-5; i++ {
+		if text[i] == text[i+1] && text[i] == text[i+2] &&
+			text[i] == text[i+3] && text[i] == text[i+4] {
+			return true
+		}
+	}
+
+	// Check for repeating 2-char patterns
+	if len(text) > 10 {
+		for i := 0; i < len(text)-6; i += 2 {
+			if text[i] == text[i+2] && text[i] == text[i+4] &&
+				text[i+1] == text[i+3] && text[i+1] == text[i+5] {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// isLikelyPlaintext performs more precise checks to determine if text is likely
+// to be actual human-readable content rather than encoded data
+func isLikelyPlaintext(text string) bool {
+	// Must have at least 10 chars to be considered
+	if len(text) < 10 {
+		return false
+	}
+
+	// Check for common word separators (spaces, punctuation)
+	spaceCount := 0
+	for _, c := range text {
+		if c == ' ' || c == '.' || c == ',' || c == '!' || c == '?' || c == ';' || c == ':' {
+			spaceCount++
+		}
+	}
+
+	// Real text usually has word separators (unless it's a password or key)
+	// but we'll accept it even without spaces as it could be concatenated words
+
+	// Check for a reasonable distribution of characters
+	// Binary data often has unusual distributions
+	freqs := make(map[byte]int)
+	for i := 0; i < len(text); i++ {
+		freqs[text[i]]++
+	}
+
+	// If a single character dominates (>50%), it's probably not meaningful text
+	for _, count := range freqs {
+		if float64(count)/float64(len(text)) > 0.5 {
+			return false
+		}
+	}
+
+	// Natural language often follows certain patterns
+	// like having vowels mixed with consonants
+	vowelCount := 0
+	for _, c := range strings.ToLower(text) {
+		if c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u' {
+			vowelCount++
+		}
+	}
+
+	// Most languages have 25-60% vowels in normal text
+	// Allow a bit wider range for potentially encoded but human-readable text
+	vowelRatio := float64(vowelCount) / float64(len(text))
+	if vowelRatio < 0.1 || vowelRatio > 0.7 {
+		// Unless it's all uppercase, which might be a key or code
+		if strings.ToUpper(text) != text {
+			return false
+		}
+	}
+
+	return true
+}
+
+// cleanupText removes non-printable characters and trims the text
+func cleanupText(text string) string {
+	var result strings.Builder
+
+	for _, c := range text {
+		if (c >= 32 && c <= 126) || c == '\n' || c == '\r' || c == '\t' {
+			result.WriteRune(c)
+		}
+	}
+
+	return strings.TrimSpace(result.String())
+}
+
+// containsMeaningfulText checks if the text is likely to be meaningful
+// rather than random sequences or encoding artifacts
+func containsMeaningfulText(text string) bool {
+	// English words usually have 4+ letters
+	// Look for at least a few letters in sequence
+	letterGroups := 0
+	currentGroup := 0
+
+	for _, c := range text {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			currentGroup++
+			if currentGroup >= 4 {
+				letterGroups++
+			}
+		} else {
+			currentGroup = 0
+		}
+	}
+
+	// Require at least one group of 4+ letters
+	// or special cases like "SECRET:" or "PASSWORD:"
+	keywords := []string{"secret", "password", "key", "login", "user", "admin", "credit"}
+	for _, keyword := range keywords {
+		if strings.Contains(strings.ToLower(text), keyword) {
+			return true
+		}
+	}
+
+	return letterGroups > 0
+}
+
+// extractImprovedEXIFText is an improved version of ExtractEXIFText
+func extractImprovedEXIFText(filename string) ([]string, error) {
+	var results []string
+
+	// Use a placeholder implementation since ExtractEXIFText is missing
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	// Read the file content
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, err
+	}
+
+	// Simplified EXIF text extraction
+	rawResults := []string{}
+	// Look for APP1 segment which typically contains EXIF
+	for i := 0; i < len(data)-10; i++ {
+		if data[i] == 0xFF && data[i+1] == markerAPP1 {
+			// Extract segment length
+			length := int(data[i+2])<<8 | int(data[i+3])
+			if i+2+length <= len(data) && length > 10 {
+				// Extract the segment data
+				segment := data[i+4 : i+2+length]
+				// Look for text strings within the segment
+				for j := 0; j < len(segment)-10; j++ {
+					end := min(j+40, len(segment))
+					window := segment[j:end]
+
+					// Check if window has printable ASCII
+					printableCount := 0
+					for _, b := range window {
+						if (b >= 32 && b <= 126) || b == '\n' || b == '\r' || b == '\t' {
+							printableCount++
+						}
+					}
+
+					// If most chars are printable
+					if float64(printableCount)/float64(len(window)) > 0.9 {
+						text := string(window)
+						rawResults = append(rawResults, cleanupText(text))
+						j += len(window) - 1
+					}
+				}
+			}
+		}
+	}
+
+	// Apply more strict filtering
+	for _, text := range rawResults {
+		if !isCommonJPEGPattern(text) && isLikelyPlaintext(text) && containsMeaningfulText(text) {
+			results = append(results, text)
+		}
+	}
+
+	return results, nil
+}
+
+// filterFalsePositives removes likely false positive results
+func filterFalsePositives(findings []string) []string {
+	var filtered []string
+
+	for _, text := range findings {
+		// Skip very short strings
+		if len(text) < 10 {
+			continue
+		}
+
+		// Skip strings with too many numbers or symbols
+		alphaCount := 0
+		for _, c := range text {
+			if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+				alphaCount++
+			}
+		}
+
+		if float64(alphaCount)/float64(len(text)) < 0.4 {
+			continue
+		}
+
+		// Additional checks for Huffman table patterns
+		if strings.Contains(text, "UVWXYZ") && strings.Contains(text, "cdefghi") {
+			continue
+		}
+
+		filtered = append(filtered, text)
+	}
+
+	return filtered
 }
 
 // CheckQuantizationTables analyzes quantization tables for suspicious patterns
@@ -504,4 +1000,34 @@ func CheckQuantizationTables(metadata *JPEGMetadata) (bool, int) {
 	}
 
 	return modified, len(metadata.QuantizationTables)
+}
+
+// ScanForPolyglotFile checks if the JPEG file is also another valid file format
+func ScanForPolyglotFile(filename string) (bool, string) {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return false, ""
+	}
+
+	// Check for ZIP signature at the end of the file
+	if len(data) > 30 && bytes.Contains(data[len(data)-30:], []byte("PK\x03\x04")) {
+		return true, "ZIP"
+	}
+
+	// Check for PDF signature
+	if bytes.Contains(data, []byte("%PDF-")) {
+		return true, "PDF"
+	}
+
+	// Check for RAR signature
+	if bytes.Contains(data, []byte("Rar!\x1A\x07")) {
+		return true, "RAR"
+	}
+
+	// Check for PNG signature
+	if bytes.Contains(data, []byte("\x89PNG\r\n\x1A\n")) {
+		return true, "PNG"
+	}
+
+	return false, ""
 }
