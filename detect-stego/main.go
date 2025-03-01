@@ -55,13 +55,26 @@ func scanFile(filename string) {
 	}
 
 	// 1) Run a Chi-Square analysis on the red-channel LSB distribution
-	chi := ChiSquareLSB(img)
-	if IsSuspiciousChiSquare(chi) {
-		fmt.Printf("[!] Chi-square result = %.4f => Suspiciously uniform distribution!\n", chi)
+	chiR := ChiSquareLSB(img, 'R')
+	if IsSuspiciousChiSquare(chiR) {
+		fmt.Printf("[!] Chi-square result (R) = %.4f => Suspiciously uniform distribution!\n", chiR)
 	} else {
-		fmt.Printf("[ ] Chi-square result = %.4f => Not strongly suspicious.\n", chi)
+		fmt.Printf("[ ] Chi-square result (R) = %.4f => Not strongly suspicious.\n", chiR)
 	}
-
+	// 1b) Run a Chi-Square analysis on the green-channel LSB distribution
+	chiG := ChiSquareLSB(img, 'G')
+	if IsSuspiciousChiSquare(chiG) {
+		fmt.Printf("[!] Chi-square result (G) = %.4f => Suspiciously uniform distribution!\n", chiG)
+	} else {
+		fmt.Printf("[ ] Chi-square result (G) = %.4f => Not strongly suspicious.\n", chiG)
+	}
+	// 1c) Run a Chi-Square analysis on the blue-channel LSB distribution
+	chiB := ChiSquareLSB(img, 'B')
+	if IsSuspiciousChiSquare(chiB) {
+		fmt.Printf("[!] Chi-square result (B) = %.4f => Suspiciously uniform distribution!\n", chiB)
+	} else {
+		fmt.Printf("[ ] Chi-square result (B) = %.4f => Not strongly suspicious.\n", chiB)
+	}
 	// 2) Brute Force LSB extraction with multiple channel/bit combos
 	results := BruteForceLSB(img)
 	if len(results) == 0 {
