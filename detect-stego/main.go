@@ -17,7 +17,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -392,6 +391,9 @@ func init() {
 	// Add word boundaries to avoid matching substrings inside other words
 	pattern := fmt.Sprintf(`(?i)\b(%s)\b`, strings.Join(shellCommands, "|"))
 	commandRegex = regexp.MustCompile(pattern)
+
+	// Initialize detection configuration
+	CurrentConfig.Initialize("")
 }
 
 // Logger is a custom logger that can buffer output
@@ -585,6 +587,36 @@ func scanFile(filename string) ScanResult {
 	// Filter out low-confidence findings
 	result.Findings = filterFindings(result.Findings)
 
+	// Use our false positive reduction system
+	fpChecker := NewFalsePositiveCheck()
+	tempResults := &ScanResults{
+		Results:     []ScanResult{result},
+		TotalFiles:  1,
+		CleanFiles:  0,
+		Suspicious:  0,
+		ConfirmedC2: 0,
+	}
+	isProbablyFalsePositive := fpChecker.EvaluateDetection(tempResults, img)
+
+	// Update the report based on false positive analysis
+	if isProbablyFalsePositive {
+		fmt.Println("\n[INFO] Detection results likely represent a FALSE POSITIVE")
+		fmt.Printf("False positive confidence: %.1f%%\n", result.FalsePositiveLikelihood*100)
+
+		// Explain why it's likely a false positive
+		if result.ModifiedQuantizationTables {
+			fmt.Println("  * Modified quantization tables are common in normal images")
+		}
+
+		if result.HiddenTextFound {
+			fmt.Println("  * Detected text appears to be standard metadata")
+		}
+
+		if result.LSBAnomaliesFound {
+			fmt.Println("  * LSB anomalies match patterns seen in normal image processing")
+		}
+	}
+
 	return result
 }
 
@@ -593,6 +625,12 @@ func filterFindings(findings []Finding) []Finding {
 	var filtered []Finding
 
 	for _, f := range findings {
+		// Skip findings related to quantization tables
+		if strings.Contains(f.Description, "quantization table") ||
+			strings.Contains(f.Description, "Quantization") {
+			continue
+		}
+
 		// Skip low-confidence LSB findings unless they have strong indicators
 		if strings.Contains(f.Description, "LSB") {
 			// Require higher confidence for LSB-based detections
@@ -601,13 +639,20 @@ func filterFindings(findings []Finding) []Finding {
 			}
 
 			// Additional validation for LSB findings
-			if !containsStrongIndicators(f.Details) {
+			// Skip LSB findings without strong indicators
+			if !strings.Contains(strings.ToLower(f.Details), "command") &&
+				!strings.Contains(strings.ToLower(f.Details), "shell") &&
+				!strings.Contains(strings.ToLower(f.Details), "exec") &&
+				!strings.Contains(strings.ToLower(f.Details), "base64") {
 				continue
 			}
 		}
 
 		// Skip findings that are common in normal images
-		if isCommonPattern(f.Description, f.Details) {
+		if strings.Contains(strings.ToLower(f.Description), "metadata") ||
+			strings.Contains(strings.ToLower(f.Details), "metadata") ||
+			strings.Contains(strings.ToLower(f.Description), "thumbnail") ||
+			strings.Contains(strings.ToLower(f.Details), "thumbnail") {
 			continue
 		}
 
@@ -615,62 +660,6 @@ func filterFindings(findings []Finding) []Finding {
 	}
 
 	return filtered
-}
-
-// Check if details contain strong indicators of steganography
-func containsStrongIndicators(details string) bool {
-	strongIndicators := []string{
-		"shell", "password", "secret", "admin",
-		"http://", "https://", "ftp://",
-		".exe", ".dll", ".sh", ".cmd",
-	}
-
-	details = strings.ToLower(details)
-
-	for _, indicator := range strongIndicators {
-		if strings.Contains(details, indicator) {
-			return true
-		}
-	}
-
-	if strings.Contains(details, "entropy") {
-		if value := extractEntropyValue(details); value > 7.9 {
-			return true
-		}
-	}
-
-	return false
-}
-
-// Check if a pattern is common in normal images (to filter false positives)
-func isCommonPattern(description, details string) bool {
-	commonPatterns := []string{
-		"slight variation in LSB",
-		"minor statistical anomaly",
-		"low entropy distribution",
-		"standard JPEG pattern",
-	}
-
-	text := strings.ToLower(description + " " + details)
-	for _, pattern := range commonPatterns {
-		if strings.Contains(text, strings.ToLower(pattern)) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// Extract entropy value from text string
-func extractEntropyValue(text string) float64 {
-	re := regexp.MustCompile(`entropy=(\d+\.\d+)`)
-	matches := re.FindStringSubmatch(text)
-	if len(matches) > 1 {
-		if value, err := strconv.ParseFloat(matches[1], 64); err == nil {
-			return value
-		}
-	}
-	return 0
 }
 
 // Run LSB analysis on an image
@@ -902,7 +891,7 @@ func runJPEGAnalysis(filename string, logger *Logger, result *ScanResult) {
 	output("Color components: %d\n", metadata.Components)
 	output("Progressive: %v\n", metadata.IsProgressive)
 
-	// Check for appended data
+	// Check for appended data (reliable indicator)
 	if metadata.HasAppendedData {
 		output("%s[!] Found %d bytes of appended data after JPEG EOF marker%s\n",
 			colorYellow, metadata.AppendedDataSize, colorReset)
@@ -910,17 +899,8 @@ func runJPEGAnalysis(filename string, logger *Logger, result *ScanResult) {
 			fmt.Sprintf("Found %d bytes of appended data", metadata.AppendedDataSize))
 	}
 
-	// Report quantization table analysis
-	output("\nAnalyzing quantization tables...\n")
-	modified, numTables := CheckQuantizationTables(metadata)
-	if modified {
-		output("%s[!] Detected modified quantization tables (%d tables)%s\n",
-			colorYellow, numTables, colorReset)
-		result.AddFinding("Modified quantization tables detected", 7, Suspicious,
-			fmt.Sprintf("Found %d modified tables", numTables))
-	} else {
-		output("[+] Quantization tables appear normal (%d tables)\n", numTables)
-	}
+	// Note: We no longer report on quantization tables as they're not a reliable indicator
+	// and cause too many false positives
 
 	// Run steganography detection
 	output("\nRunning steganalysis...\n")
@@ -973,30 +953,42 @@ func runJPEGAnalysis(filename string, logger *Logger, result *ScanResult) {
 	output("\nScanning for hidden text...\n")
 	findings, err := ScanForPlaintextStego(filename)
 	if err == nil && len(findings) > 0 {
-		output("%s[!] Found potential hidden text:%s\n", colorYellow, colorReset)
+		// Filter out metadata to reduce false positives
+		var nonMetadataFindings []string
 		for _, text := range findings {
-			output("    > %s\n", text)
-
-			// Check if the found text contains C2 indicators
-			if isC2, reason := IsLikelyC2Traffic(text); isC2 {
-				result.AddFinding(
-					"Found potential C2 traffic in hidden text",
-					10,
-					ConfirmedC2,
-					reason,
-				)
-			} else {
-				result.AddFinding(
-					"Found hidden text",
-					7,
-					Suspicious,
-					fmt.Sprintf("Text: %s", text),
-				)
+			if !IsMetadataString(text) {
+				nonMetadataFindings = append(nonMetadataFindings, text)
 			}
+		}
+
+		if len(nonMetadataFindings) > 0 {
+			output("%s[!] Found potential hidden text (excluding metadata):%s\n", colorYellow, colorReset)
+			for _, text := range nonMetadataFindings {
+				output("    > %s\n", text)
+
+				// Check if the found text contains C2 indicators
+				if isC2, reason := IsLikelyC2Traffic(text); isC2 {
+					result.AddFinding(
+						"Found potential C2 traffic in hidden text",
+						10,
+						ConfirmedC2,
+						reason,
+					)
+				} else {
+					result.AddFinding(
+						"Found hidden text",
+						7,
+						Suspicious,
+						fmt.Sprintf("Text: %s", text),
+					)
+				}
+			}
+		} else {
+			output("[ ] No suspicious hidden text found (only standard metadata)\n")
 		}
 	}
 
-	// Check for polyglot files
+	// Check for polyglot files (reliable indicator)
 	if isPolyglot, format := ScanForPolyglotFile(filename); isPolyglot {
 		output("%s[!] File appears to be a polyglot - also contains %s format%s\n",
 			colorYellow, format, colorReset)
