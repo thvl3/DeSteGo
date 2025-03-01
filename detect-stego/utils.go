@@ -2,11 +2,15 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"image"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"math"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 // LoadPNG loads a PNG from disk into an image.Image.
@@ -22,6 +26,52 @@ func LoadPNG(filename string) (image.Image, error) {
 // DecodePNGFromReader decodes a PNG from an io.Reader into an image.Image.
 func DecodePNGFromReader(r io.Reader) (image.Image, error) {
 	return png.Decode(r)
+}
+
+// LoadImage loads a PNG or JPEG from disk into an image.Image.
+func LoadImage(filename string) (image.Image, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	// Decode the image based on file extension
+	ext := strings.ToLower(filepath.Ext(filename))
+	switch ext {
+	case ".png":
+		return png.Decode(f)
+	case ".jpg", ".jpeg":
+		return jpeg.Decode(f)
+	default:
+		return nil, fmt.Errorf("unsupported image format: %s", ext)
+	}
+}
+
+// GetImageFormat determines the format of an image file
+func GetImageFormat(filename string) (string, error) {
+	// Check file extension
+	ext := strings.ToLower(filepath.Ext(filename))
+	switch ext {
+	case ".png":
+		return "png", nil
+	case ".jpg", ".jpeg":
+		return "jpeg", nil
+	default:
+		return "", fmt.Errorf("unsupported image format: %s", ext)
+	}
+}
+
+// IsJPEG returns true if the filename has a .jpg or .jpeg extension
+func IsJPEG(filename string) bool {
+	ext := strings.ToLower(filepath.Ext(filename))
+	return ext == ".jpg" || ext == ".jpeg"
+}
+
+// IsPNG returns true if the filename has a .png extension
+func IsPNG(filename string) bool {
+	ext := strings.ToLower(filepath.Ext(filename))
+	return ext == ".png"
 }
 
 // IsASCIIPrintable checks if a byte slice is predominantly printable ASCII.
