@@ -5,12 +5,16 @@ import (
 	"flag"
 	"fmt"
 	"image"
+
+	//"image/jpeg" // Add JPEG support
 	_ "image/jpeg"
+	//"image/png"
 	_ "image/png"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -75,16 +79,19 @@ func main() {
 	}
 }
 
-// scanDirectorySequential processes PNG files one at a time
+// scanDirectorySequential processes image files one at a time
 func scanDirectorySequential(dirPath string) {
-	// Gather .png files
+	// Gather .png and .jpg files
 	var files []string
 	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() && filepath.Ext(info.Name()) == ".png" {
-			files = append(files, path)
+		if !info.IsDir() {
+			ext := strings.ToLower(filepath.Ext(info.Name()))
+			if ext == ".png" || ext == ".jpg" || ext == ".jpeg" {
+				files = append(files, path)
+			}
 		}
 		return nil
 	})
@@ -93,7 +100,7 @@ func scanDirectorySequential(dirPath string) {
 		return
 	}
 
-	fmt.Printf("Found %d PNG files to scan\n", len(files))
+	fmt.Printf("Found %d image files to scan\n", len(files))
 
 	// Process files sequentially
 	for _, f := range files {
@@ -101,16 +108,19 @@ func scanDirectorySequential(dirPath string) {
 	}
 }
 
-// scanDirectoryConcurrent processes PNG files in parallel (original implementation)
+// scanDirectoryConcurrent processes image files in parallel
 func scanDirectoryConcurrent(dirPath string) {
-	// Gather .png files
+	// Gather .png and .jpg files
 	var files []string
 	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() && filepath.Ext(info.Name()) == ".png" {
-			files = append(files, path)
+		if !info.IsDir() {
+			ext := strings.ToLower(filepath.Ext(info.Name()))
+			if ext == ".png" || ext == ".jpg" || ext == ".jpeg" {
+				files = append(files, path)
+			}
 		}
 		return nil
 	})
@@ -158,32 +168,46 @@ func scanDirectoryConcurrent(dirPath string) {
 func scanFileBuffered(filename string, logger *Logger) {
 	logger.Printf("\n--- Scanning %s ---\n", filename)
 
-	img, err := LoadPNG(filename)
+	img, err := LoadImage(filename)
 	if err != nil {
-		logger.Printf("[-] Failed to open/parse PNG: %v\n", err)
+		logger.Printf("[-] Failed to open/parse image: %v\n", err)
 		return
 	}
 
-	// Run multiple detection methods
-	runChiSquareAnalysis(img, logger)
-	runLSBAnalysis(img, logger)
-	runJSLSBDetection(img, logger)
+	format, _ := GetImageFormat(filename)
+	logger.Printf("Image format: %s\n", format)
+
+	// Run appropriate detection methods based on format
+	if format == "png" {
+		runChiSquareAnalysis(img, logger)
+		runLSBAnalysis(img, logger)
+		runJSLSBDetection(img, logger)
+	} else if format == "jpeg" {
+		runJPEGAnalysis(img, filename, logger)
+	}
 }
 
 // scanFile performs all detection steps on a single file with direct output
 func scanFile(filename string) {
 	fmt.Printf("\n--- Scanning %s ---\n", filename)
 
-	img, err := LoadPNG(filename)
+	img, err := LoadImage(filename)
 	if err != nil {
-		fmt.Printf("[-] Failed to open/parse PNG: %v\n", err)
+		fmt.Printf("[-] Failed to open/parse image: %v\n", err)
 		return
 	}
 
-	// Run multiple detection methods
-	runChiSquareAnalysis(img, nil)
-	runLSBAnalysis(img, nil)
-	runJSLSBDetection(img, nil)
+	format, _ := GetImageFormat(filename)
+	fmt.Printf("Image format: %s\n", format)
+
+	// Run appropriate detection methods based on format
+	if format == "png" {
+		runChiSquareAnalysis(img, nil)
+		runLSBAnalysis(img, nil)
+		runJSLSBDetection(img, nil)
+	} else if format == "jpeg" {
+		runJPEGAnalysis(img, filename, nil)
+	}
 }
 
 // runChiSquareAnalysis runs Chi-Square tests on the image
@@ -372,6 +396,87 @@ func runJSLSBDetection(img image.Image, logger *Logger) {
 	if dist.Entropy > 0.95 || dist.Entropy < 0.6 {
 		output("[!] LSB entropy analysis suggests hidden data (entropy=%.4f)\n", dist.Entropy)
 	}
+}
+
+// runJPEGAnalysis performs JPEG-specific steganalysis
+func runJPEGAnalysis(img image.Image, filename string, logger *Logger) {
+	output := func(format string, args ...interface{}) {
+		if logger != nil {
+			logger.Printf(format, args...)
+		} else {
+			fmt.Printf(format, args...)
+		}
+	}
+
+	output("\n=== JPEG Analysis ===\n")
+
+	// 1. Analyze DCT coefficient histograms
+	jfifData, err := ExtractJPEGMetadata(filename)
+	if err != nil {
+		output("[-] Failed to extract JPEG metadata: %v\n", err)
+		return
+	}
+
+	// 2. Check for signs of steganography
+	if isJPEGModified := DetectJPEGSteganography(jfifData); isJPEGModified {
+		output("[!] JPEG analysis suggests possible steganography\n")
+
+		// Check for specific steganography tools
+		if DetectJSteg(jfifData) {
+			output("[!] Detected possible JSteg steganography\n")
+		}
+
+		if DetectF5(jfifData) {
+			output("[!] Detected possible F5 steganography\n")
+		}
+
+		if DetectOutguess(jfifData) {
+			output("[!] Detected possible Outguess steganography\n")
+		}
+	} else {
+		output("[ ] No signs of JPEG steganography detected\n")
+	}
+
+	// 3. Other JPEG-specific checks
+	output("\n=== JPEG File Structure Analysis ===\n")
+
+	// Check for appended data
+	if hasAppendedData, dataSize := CheckAppendedData(filename); hasAppendedData {
+		output("[!] Found %d bytes of data appended after JPEG EOI marker\n", dataSize)
+
+		// Try to extract and analyze the appended data
+		appendedData, err := ExtractAppendedData(filename)
+		if err == nil && len(appendedData) > 0 {
+			if IsASCIIPrintable(appendedData) {
+				output("[+] Appended data appears to be ASCII text:\n%s\n",
+					string(appendedData[:min(100, len(appendedData))]))
+				if len(appendedData) > 100 {
+					output("... (%d more bytes)\n", len(appendedData)-100)
+				}
+			} else {
+				output("[+] Appended data is binary (%d bytes, entropy: %.2f)\n",
+					len(appendedData), ComputeEntropy(appendedData))
+			}
+		}
+	} else {
+		output("[ ] No data appended after JPEG EOI marker\n")
+	}
+
+	// Check for mismatched quantization tables
+	if hasModifiedTables, tableCount := CheckQuantizationTables(jfifData); hasModifiedTables {
+		output("[!] Detected non-standard quantization tables (%d tables)\n", tableCount)
+		output("    This may indicate steganographic manipulation\n")
+	} else {
+		output("[ ] Quantization tables appear standard\n")
+	}
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // ExtractBitsDirectly extracts bits directly from the image without assuming a length prefix
