@@ -6,6 +6,19 @@ import (
 	"DeSteGo/pkg/models"
 )
 
+/*
+Analyzer.go contains the interface and base implementation for file analyzers.
+FileAnalyzer: interface defines the methods that all file analyzers must implement.
+ImageAnalyzer: interface extends the FileAnalyzer interface and adds a method for analyzing images directly.
+BaseAnalyzer: struct provides common functionality for analyzers, such as name, description, and supported formats.
+AnalysisOptions: struct holds configuration options for analysis, such as verbosity, output format, and extraction.
+AnalysisResult: struct contains the results of a steganography analysis, including file type, detection score, confidence, possible algorithm, details, findings, recommendations, extraction hints, analysis time, and duration.
+Finding struct: represents a specific detection or discovery during analysis, including a description, confidence, and details.
+ExtractionHint: struct provides guidance for data extraction, including an algorithm, confidence, and parameters.
+ExtractionResult: struct contains the results of an extraction attempt, including success, file type, algorithm, data type, extracted data, data size, details, and output files.
+BaseAnalyzer struct: and the FileAnalyzer interface are used by specific analyzers to provide consistent functionality and structure.
+*/
+
 // AnalysisOptions holds configuration options for analysis
 type AnalysisOptions struct {
 	Verbose bool

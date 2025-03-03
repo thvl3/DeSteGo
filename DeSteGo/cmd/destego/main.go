@@ -2,7 +2,8 @@ package main
 
 import (
 	"DeSteGo/pkg/analyzer"
-	"DeSteGo/pkg/analyzer/image"
+	jpeganalyzer "DeSteGo/pkg/analyzer/image/jpeg"
+	pnganalyzer "DeSteGo/pkg/analyzer/image/png"
 	"DeSteGo/pkg/filehandler"
 	"DeSteGo/pkg/models"
 	"flag"
@@ -191,8 +192,8 @@ func main() {
 
 func registerAnalyzers(registry *analyzer.Registry) {
 	// Register all available analyzers
-	registry.Register(image.NewPNGAnalyzer())
-	registry.Register(image.NewJPEGAnalyzer())
+	registry.Register(pnganalyzer.NewPNGAnalyzer())
+	registry.Register(jpeganalyzer.NewJPEGAnalyzer())
 	// Add more analyzers as they become available
 }
 
