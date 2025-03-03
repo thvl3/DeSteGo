@@ -1,7 +1,7 @@
 # Variables
 BINARY_NAME=destego
 BUILD_DIR=build
-CMD_DIR=cmd/destego
+CMD_DIR=cmd/
 VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "v0.0.5")
 LDFLAGS=-ldflags "-X main.version=$(VERSION)"
 GOPATH=$(shell go env GOPATH)
