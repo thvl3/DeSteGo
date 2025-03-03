@@ -1,7 +1,7 @@
 # Variables
 BINARY_NAME=destego
 BUILD_DIR=build
-CMD_DIR=DeSteGo/cmd/destego
+CMD_DIR=cmd/destego
 VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "v0.0.5")
 LDFLAGS=-ldflags "-X main.version=$(VERSION)"
 GOPATH=$(shell go env GOPATH)
@@ -16,7 +16,7 @@ all: build
 build:
 	@echo "Building DeSteGo $(VERSION)..."
 	@mkdir -p $(BUILD_DIR)
-	go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./$(CMD_DIR)
+	go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./$(CMD_DIR)/*.go
 	@echo "Build complete: $(BUILD_DIR)/$(BINARY_NAME)"
 
 # Clean build artifacts
