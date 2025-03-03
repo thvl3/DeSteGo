@@ -63,7 +63,7 @@ func main() {
 	flag.Parse()
 
 	// Banner and version info
-	fmt.Println("DeSteGo v1.0.0")
+	fmt.Println("DeSteGo v0.0.5")
 	fmt.Println("A wide net steganography analysis tool")
 	fmt.Println("Developed by Ethan Hulse")
 	fmt.Println("---------------------------------")
