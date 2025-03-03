@@ -43,6 +43,7 @@ type ExtractionResult struct {
 	DataSize      int                    `json:"dataSize"`
 	Details       map[string]interface{} `json:"details"`
 	OutputFiles   []string               `json:"outputFiles"` // Paths to any saved output files
+	MimeType      string                 `json:"mimeType"`
 }
 
 // AddFinding adds a finding to the analysis result
