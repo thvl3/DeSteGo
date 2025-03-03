@@ -566,10 +566,10 @@ func calculateRepetitionPenalty(data []byte) float64 {
 // processExtractedData analyzes the extracted data and saves it appropriately
 func processExtractedData(candidate *ExtractionCandidate, options extractor.ExtractionOptions) (*models.ExtractionResult, error) {
 	data := candidate.Data
-	if data == nil || len(data) == 0 {
-		return nil, errors.New("no data extracted")
-	}
-
+	//Removed nil check as its unnecessary
+	//if data == nil || len(data) == 0 {
+	//	return nil, errors.New("no extracted data to process")
+	//}
 	// Try to detect the file type
 	fileType := detectFileSignature(data)
 
