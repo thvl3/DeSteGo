@@ -56,6 +56,13 @@ test:
 run: build
 	@$(BUILD_DIR)/$(BINARY_NAME)
 
+# go mod tidy
+.PHONY: tidy
+tidy:
+	@echo "Tidying go modules..."
+	@go mod tidy
+	@echo "Tidy complete"
+	
 # Show help
 .PHONY: help
 help:
